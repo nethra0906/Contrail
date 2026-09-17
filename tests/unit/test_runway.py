@@ -1,4 +1,4 @@
-"""Tests for the pure runway queueing model. Includes the exact test named
+"""This has tests for the pure runway queueing model. Includes the exact test named
 in the master spec's Stage 7 DoD: "closing a runway must increase delay
 monotonically."
 """
