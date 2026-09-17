@@ -1,0 +1,159 @@
+name: contrail
+
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-contrail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contrail}
+      POSTGRES_DB: ${POSTGRES_DB:-contrail}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-contrail}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=768M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:29092,OUTSIDE://localhost:19092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=localhost:8082
+    ports:
+      - "19092:19092"
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-08-29T01-40-52Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-contrail}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-changeme_local_dev_only}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # NOTE on api/ingest/assembler's `environment:` blocks below: .env's
+  # DATABASE_URL/REDIS_URL/etc default to `localhost`, which is correct for
+  # anything run directly on the host (uvicorn via `make api-dev`, alembic,
+  # scripts/*) reaching these services through their published ports - but
+  # WRONG inside a container, where `localhost` means the container itself,
+  # not the `postgres`/`redis`/`redpanda` service. Discovered live: the
+  # containerized API 500'd on every DB-touching request with
+  # ConnectionRefusedError against 127.0.0.1:5432. `environment:` here
+  # overrides just those host-name-bearing values to the Compose service DNS
+  # names; env_file still supplies everything else (secrets, feature flags).
+  api:
+    build:
+      context: .
+      dockerfile: infra/deploy/Dockerfile.api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-contrail}:${POSTGRES_PASSWORD:-contrail}@postgres:5432/${POSTGRES_DB:-contrail}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ingest:
+    build:
+      context: .
+      dockerfile: infra/deploy/Dockerfile.worker
+    command: ["python", "-m", "services.ingest.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-contrail}:${POSTGRES_PASSWORD:-contrail}@postgres:5432/${POSTGRES_DB:-contrail}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  assembler:
+    build:
+      context: .
+      dockerfile: infra/deploy/Dockerfile.worker
+    command: ["python", "-m", "services.assembler.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-contrail}:${POSTGRES_PASSWORD:-contrail}@postgres:5432/${POSTGRES_DB:-contrail}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./infra/prometheus:/etc/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./infra/grafana:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+
+volumes:
+  pgdata:
+  miniodata:

@@ -1,0 +1,226 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------
+   DESIGN TOKENS
+
+   Single source of truth for the whole app's visual language. Every
+   color, radius, shadow and timing value used anywhere in the UI should
+   trace back to one of these - that is what "consistent theme" means in
+   practice, not a rule enforced by convention alone.
+
+   Palette concept: a deep-space aviation night sky. The base is a near-
+   black navy (not pure black, which reads as "unstyled" rather than
+   "designed"). The signature accent is the same amber-to-cyan gradient
+   the altitude legend already uses (ground -> cruise altitude) - reused
+   everywhere as the app's core visual motif instead of inventing a
+   second, unrelated accent language.
+   --------------------------------------------------------------------- */
+:root {
+  /* Surfaces */
+  --bg-void: #050810;
+  --bg-base: #070b16;
+  --bg-raised: #0d1424;
+  --bg-overlay: rgba(13, 20, 36, 0.82);
+  --bg-overlay-strong: rgba(7, 11, 22, 0.94);
+  --border-subtle: rgba(148, 163, 184, 0.12);
+  --border-default: rgba(148, 163, 184, 0.2);
+  --border-strong: rgba(148, 163, 184, 0.35);
+
+  /* Text */
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-tertiary: #5b6b85;
+  --text-inverse: #050810;
+
+  /* Signature accent gradient: ground (amber) -> cruise altitude (cyan) */
+  --accent-amber: #fbbf24;
+  --accent-amber-soft: rgba(251, 191, 36, 0.16);
+  --accent-cyan: #22d3ee;
+  --accent-cyan-soft: rgba(34, 211, 238, 0.16);
+  --accent-gradient: linear-gradient(120deg, var(--accent-amber), var(--accent-cyan));
+  --accent-gradient-soft: linear-gradient(120deg, var(--accent-amber-soft), var(--accent-cyan-soft));
+
+  /* Status */
+  --status-live: #34d399;
+  --status-warn: #fbbf24;
+  --status-error: #f87171;
+  --status-idle: #64748b;
+
+  /* Elevation / glow */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px -8px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 24px 64px -16px rgba(0, 0, 0, 0.65);
+  --glow-cyan: 0 0 24px rgba(34, 211, 238, 0.25);
+  --glow-amber: 0 0 24px rgba(251, 191, 36, 0.25);
+
+  /* Radius scale */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+
+  /* Motion - one shared timing language for every animation in the app */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-base: 280ms;
+  --duration-slow: 480ms;
+
+  --background: var(--bg-base);
+  --foreground: var(--text-primary);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-void: var(--bg-void);
+  --color-base: var(--bg-base);
+  --color-raised: var(--bg-raised);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-default: var(--border-default);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-accent-amber: var(--accent-amber);
+  --color-accent-cyan: var(--accent-cyan);
+  --color-status-live: var(--status-live);
+  --color-status-warn: var(--status-warn);
+  --color-status-error: var(--status-error);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  border-color: var(--border-subtle);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-feature-settings:
+    "cv02",
+    "cv03",
+    "cv04",
+    "cv11";
+  overflow-x: hidden;
+}
+
+/* Custom scrollbar - thin, tinted, consistent with the rest of the theme
+   rather than the browser default breaking the illusion of a designed UI. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: content-box;
+}
+
+/* Custom cursor: hide the native cursor on fine-pointer (mouse/trackpad)
+   devices only - touch devices keep their native behavior untouched,
+   since there is no cursor to replace there and hiding it would just
+   break tap feedback. */
+@media (hover: hover) and (pointer: fine) {
+  html,
+  body,
+  a,
+  button,
+  [role="button"] {
+    cursor: none;
+  }
+}
+
+/* Selection color matches the accent language instead of the browser default blue. */
+::selection {
+  background: var(--accent-cyan-soft);
+  color: var(--text-primary);
+}
+
+@keyframes contrail-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes contrail-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes contrail-pulse-ring {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes contrail-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-fade-in {
+  animation: contrail-fade-in var(--duration-slow) var(--ease-out) both;
+}
+
+.animate-float {
+  animation: contrail-float 4s var(--ease-in-out) infinite;
+}
+
+.text-gradient {
+  background: var(--accent-gradient);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--bg-raised) 25%,
+    rgba(148, 163, 184, 0.12) 37%,
+    var(--bg-raised) 63%
+  );
+  background-size: 400% 100%;
+  animation: contrail-shimmer 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
