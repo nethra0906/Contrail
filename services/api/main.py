@@ -8,6 +8,7 @@ from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from services.api.routers import aircraft, airports, health
+from services.api.ws.live import router as ws_live_router
 from services.common.config import get_settings
 from services.common.telemetry import configure_logging, get_logger
 
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(aircraft.router, prefix="/api/v1")
     app.include_router(airports.router, prefix="/api/v1")
+    app.include_router(ws_live_router)
 
     @app.get("/metrics")
     async def metrics() -> Response:

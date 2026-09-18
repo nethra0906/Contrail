@@ -2,7 +2,9 @@
 idempotently upsert directly into `state_vectors`. Stage 3 adds a Kafka
 producer in front of this write so the event log becomes the source of
 truth; the upsert logic here is unchanged either way since it's already
-idempotent on (icao24, ts).
+idempotent on (icao24, ts). The direct DB write stays even after Kafka is
+wired in - `/api/v1/aircraft` still polls `state_vectors` directly, and
+losing that path on a broker hiccup would take the live map down with it.
 """
 
 from __future__ import annotations
@@ -11,24 +13,33 @@ import asyncio
 import contextlib
 import signal
 
+from aiokafka import AIOKafkaProducer
 from sqlalchemy.dialects.postgresql import insert
 
+from services.common.bus import TOPIC_ADSB_RAW, make_producer
 from services.common.config import get_settings
 from services.common.db import get_sessionmaker
+from services.common.geo import latlon_to_h3
 from services.common.models import StateVector
 from services.common.schemas.aircraft import StateVectorIn
-from services.common.telemetry import configure_logging, get_logger
+from services.common.telemetry import INGEST_MESSAGES_TOTAL, configure_logging, get_logger
 from services.ingest.normalizer import dedupe_latest
 from services.ingest.sources.adsb_lol import AdsbLolSource
 
 logger = get_logger(__name__)
 
 
+def _row_for_db(record: StateVectorIn) -> dict:
+    row = record.model_dump()
+    row["h3_r5"] = latlon_to_h3(record.lat, record.lon)
+    return row
+
+
 async def write_batch(records: list[StateVectorIn]) -> int:
     if not records:
         return 0
     sessionmaker = get_sessionmaker()
-    rows = [r.model_dump() for r in dedupe_latest(records)]
+    rows = [_row_for_db(r) for r in dedupe_latest(records)]
     async with sessionmaker() as session:
         stmt = insert(StateVector).values(rows)
         # (icao24, ts) is the natural idempotency key: ADS-B feeds redeliver
@@ -44,6 +55,19 @@ async def write_batch(records: list[StateVectorIn]) -> int:
     return len(rows)
 
 
+async def publish_batch(producer: AIOKafkaProducer, records: list[StateVectorIn]) -> None:
+    """Publish every raw state vector to `adsb.raw`, keyed by icao24 so a
+    single partition sees one aircraft's reports in order. Unlike the DB
+    write this is not deduped across overlapping tiles - the event log is
+    meant to be the full, at-least-once replay record; the assembler
+    consumer is the place idempotency on (icao24, ts) gets applied again.
+    """
+    for record in records:
+        payload = record.model_dump(mode="json")
+        payload["h3_r5"] = latlon_to_h3(record.lat, record.lon)
+        await producer.send_and_wait(TOPIC_ADSB_RAW, value=payload, key=record.icao24.encode())
+
+
 async def run() -> None:
     configure_logging()
     settings = get_settings()
@@ -55,6 +79,7 @@ async def run() -> None:
     # handful of tiles if you want sub-30s cadence.
     poll_interval = settings.ingest_poll_interval_seconds
     source = AdsbLolSource()
+    producer = await make_producer()
     stop_event = asyncio.Event()
 
     def _handle_signal() -> None:
@@ -76,6 +101,8 @@ async def run() -> None:
                 batch.append(sv)
 
             written = await write_batch(batch)
+            await publish_batch(producer, batch)
+            INGEST_MESSAGES_TOTAL.labels(source="adsb_lol").inc(len(batch))
             logger.info("poll_cycle_complete", fetched=len(batch), written=written)
 
             elapsed = loop.time() - cycle_start
@@ -87,6 +114,7 @@ async def run() -> None:
                     await asyncio.wait_for(stop_event.wait(), timeout=remaining)
     finally:
         await source.close()
+        await producer.stop()
         logger.info("ingest_stopped")
 
 

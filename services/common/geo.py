@@ -13,7 +13,15 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import h3
+
 EARTH_RADIUS_M = 6_371_008.8  # IUGG mean radius
+
+# Resolution 5 cells are ~250 km2 - coarse enough that a live-map viewport
+# subscribes to a handful of cells, fine enough that a client panning across
+# the country isn't force-fed the whole CONUS feed. Matches the h3_r5 column
+# on state_vectors (see migrations/versions/0001_initial_schema.py).
+H3_LIVE_RESOLUTION = 5
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,13 @@ def from_enu(east: float, north: float, anchor: LatLon) -> LatLon:
     d_lat = north / EARTH_RADIUS_M
     d_lon = east / (EARTH_RADIUS_M * math.cos(lat_rad))
     return LatLon(anchor.lat + math.degrees(d_lat), anchor.lon + math.degrees(d_lon))
+
+
+def latlon_to_h3(lat: float, lon: float, resolution: int = H3_LIVE_RESOLUTION) -> str:
+    """H3 cell index for a position report, used both as the `h3_r5` storage
+    column and as the live WS feed's viewport-subscription key.
+    """
+    return h3.latlng_to_cell(lat, lon, resolution)
 
 
 def bbox_contains(lat: float, lon: float, bbox: tuple[float, float, float, float]) -> bool:

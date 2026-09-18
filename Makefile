@@ -1,4 +1,4 @@
-.PHONY: up down logs seed migrate revision train test test-unit test-integration lint fmt typecheck bench frontend-dev api-dev ingest-dev
+.PHONY: up down logs seed migrate revision train test test-unit test-integration lint fmt typecheck bench frontend-dev api-dev ingest-dev assembler-dev
 
 up:
 	docker compose up -d --build
@@ -44,6 +44,9 @@ api-dev:
 
 ingest-dev:
 	.venv/Scripts/python -m services.ingest.main
+
+assembler-dev:
+	.venv/Scripts/python -m services.assembler.main
 
 frontend-dev:
 	cd frontend && npm run dev

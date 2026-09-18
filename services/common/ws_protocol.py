@@ -5,6 +5,10 @@ parse-cost problem in the browser. A fixed-size binary record lets the
 frontend read straight into typed arrays without a JSON.parse pass over
 thousands of objects every tick.
 
+Lives in `services.common` (not `services.api`) because both the API's
+`/ws/live` endpoint and the assembler (which encodes delta frames for Redis
+pub/sub fanout) need it.
+
 Frame layout (little-endian, matches struct format strings below):
 
     Header:  u8 version | u8 frame_type | u32 ts_delta_ms | u16 record_count

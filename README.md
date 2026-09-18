@@ -9,9 +9,10 @@ its flagship capability - lets you fork reality at any past timestamp, inject
 a disruption (close a runway, drop capacity, inject a weather cell), simulate
 forward, and diff the counterfactual world against what actually happened.
 
-> **Status: early build.** Stage 1 (foundation) and Stage 2 (live map MVP)
-> are implemented and tested. See [Build status](#build-status) below for
-> exactly what's real today versus what's specified but not yet built. This
+> **Status: early build.** Stage 1 (foundation), Stage 2 (live map MVP), and
+> the backend half of Stage 3 (streaming backbone) are implemented and
+> tested. See [Build status](#build-status) below for exactly what's real
+> today versus what's specified but not yet built. This
 > section will be replaced with real screenshots and a demo link once
 > further stages land - see `docs/CONTRAIL_MASTER_SPEC.md` for the full plan.
 
@@ -87,21 +88,41 @@ what was *rejected* (Kubernetes, Neo4j, MongoDB, Airflow) and why.
   respond correctly.
 - `frontend`: a real Next.js app - a GPU-rendered live map (deck.gl +
   MapLibre) polling the API, with an aircraft detail panel showing track
-  history. Builds, typechecks, and lints clean.
+  history. Builds, typechecks, and lints clean. Still on the Stage 2 REST
+  polling path - not yet switched to the Stage 3 `/ws/live` feed below.
+- Stage 3 streaming backbone (backend half): `services/ingest` publishes
+  every normalized state vector to the `adsb.raw` Kafka (Redpanda) topic,
+  keyed by `icao24`, alongside its existing idempotent DB upsert; the new
+  `services/assembler` consumes that topic, runs the track-state machine
+  (ground/climb/cruise/descent/approach) and leg detector on each aircraft's
+  stream, resolves the nearest airport for takeoff/landing events, persists
+  opened/closed legs to `flights`, and fans live position deltas out over
+  Redis pub/sub, one channel per H3 (resolution-5) cell; `/ws/live` on the
+  API subscribes a client to its viewport's cells, sends a full snapshot
+  from `state_vectors` on connect, then forwards deltas as binary frames
+  using the wire protocol in `services/common/ws_protocol.py`. Verified
+  end-to-end against live ADS-B traffic with Docker up: ingest to Kafka to
+  assembler to Redis to a real WebSocket client, consumer lag holding at
+  zero across 800+ real messages, and real takeoff events correctly
+  resolving their departure airport (e.g. KATL, KORD). Not yet built:
+  Parquet cold-storage sink, adaptive per-phase sampling, and the frontend's
+  switch from polling to this feed.
 - `scripts/seed_reference_data.py`: pulls real airport + runway data from
   OurAirports, filtered to the CONUS bbox.
-- 34 passing unit tests: property-based geodesy tests (hypothesis), real
-  normalizer tests against a **recorded live API fixture**, and a full
-  rejection-test suite for `ScenarioSpec` (every validation rule has a test).
+- 125 passing unit tests: property-based geodesy tests (hypothesis), real
+  normalizer tests against a **recorded live API fixture**, a full
+  rejection-test suite for `ScenarioSpec` (every validation rule has a
+  test), the WS binary protocol's round-trip property test, and the
+  assembler's takeoff/landing/coverage-gap decision logic.
 - 3 integration tests (`tests/integration/`, require Docker + testcontainers)
   proving the ingest write path is idempotent and the bbox query returns only
   the latest position per aircraft.
 
 **Specified, not yet built** (see `docs/CONTRAIL_MASTER_SPEC.md` §9 for the
-full 10-stage plan): Kafka-backed streaming + WebSocket live push (Stage 3),
-the ML models - trajectory forecasting, ETA, delay-propagation GNN, anomaly
-detection (Stage 4–5), the timeline/time-machine (Stage 6), and the
-counterfactual simulation sandbox - the flagship feature (Stage 7).
+full 10-stage plan): the ML models - trajectory forecasting, ETA,
+delay-propagation GNN, anomaly detection (Stage 4-5), the
+timeline/time-machine (Stage 6), and the counterfactual simulation sandbox -
+the flagship feature (Stage 7).
 
 **Known deviations from the original spec**, discovered by actually running
 the code against real services rather than assumed: `airplanes.live` is not

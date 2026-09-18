@@ -1,6 +1,6 @@
 """Round-trip property tests for the binary WS protocol - the wire format
 the live map depends on for 60fps rendering of 10k+ aircraft. See
-services/api/ws/protocol.py for the frame layout.
+services/common/ws_protocol.py for the frame layout.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from services.api.ws.protocol import (
+from services.common.ws_protocol import (
     FRAME_TYPE_DELTA,
     FRAME_TYPE_FULL,
     AircraftRecord,
