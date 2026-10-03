@@ -2,13 +2,13 @@
 
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScatterplotLayer } from "@deck.gl/layers";
-import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import maplibregl from "maplibre-gl";
 import { useEffect, useRef } from "react";
-import { listAircraft, type AircraftState } from "@/lib/api-client";
+import type { AircraftState } from "@/lib/api-client";
 import { fadeInUp } from "@/lib/motion";
 import { useMapStore } from "@/lib/store";
+import { useLiveAircraftFeed } from "@/lib/ws-client";
 import { AnimatedCounter } from "@/components/ui/AnimatedCounter";
 import { AltitudeLegend } from "./AltitudeLegend";
 
@@ -35,18 +35,13 @@ export function LiveMap() {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const overlayRef = useRef<MapboxOverlay | null>(null);
   const bbox = useMapStore((s) => s.bbox);
+  const setBbox = useMapStore((s) => s.setBbox);
   const selectedIcao24 = useMapStore((s) => s.selectedIcao24);
   const selectAircraft = useMapStore((s) => s.selectAircraft);
 
-  const {
-    data: aircraft,
-    dataUpdatedAt,
-    isError,
-    isLoading,
-  } = useQuery({
-    queryKey: ["aircraft", bbox],
-    queryFn: () => listAircraft(bbox),
-  });
+  const { aircraft, status, lastUpdatedAt } = useLiveAircraftFeed(bbox);
+  const isError = status === "error";
+  const isLoading = status === "connecting";
 
   useEffect(() => {
     if (!mapContainer.current || mapRef.current) return;
@@ -67,11 +62,32 @@ export function LiveMap() {
     mapRef.current = map;
     overlayRef.current = overlay;
 
+    // The WS live feed subscribes to H3 cells covering this viewport, not
+    // the whole CONUS bbox - the server caps a connection at 300 cells
+    // (MAX_SUBSCRIBED_CELLS in services/api/ws/live.py), and the full CONUS
+    // bbox alone covers tens of thousands of resolution-5 cells. Keeping
+    // `bbox` tied to what's actually on screen is what makes "a few hundred
+    // cells" true rather than silently dropping most of the country.
+    const syncBboxToViewport = () => {
+      const b = map.getBounds();
+      setBbox({
+        minLat: b.getSouth(),
+        maxLat: b.getNorth(),
+        minLon: b.getWest(),
+        maxLon: b.getEast(),
+      });
+    };
+    map.on("load", syncBboxToViewport);
+    map.on("moveend", syncBboxToViewport);
+
     return () => {
+      map.off("load", syncBboxToViewport);
+      map.off("moveend", syncBboxToViewport);
       map.remove();
       mapRef.current = null;
       overlayRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -143,9 +159,9 @@ export function LiveMap() {
         <div style={{ color: "var(--text-tertiary)" }}>
           {isError
             ? "is the API running?"
-            : dataUpdatedAt
-              ? `updated ${new Date(dataUpdatedAt).toLocaleTimeString()}`
-              : "loading..."}
+            : lastUpdatedAt
+              ? `updated ${new Date(lastUpdatedAt).toLocaleTimeString()}`
+              : "connecting..."}
         </div>
       </motion.div>
 
