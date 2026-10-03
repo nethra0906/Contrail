@@ -1,37 +1,34 @@
 "use client";
 
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { ParticleField } from "./ParticleField";
 
 interface NavItem {
   label: string;
-  active: boolean;
+  href?: string;
   stage?: string;
   description?: string;
 }
 
+// An item with `href` is a real route and renders as a link; one without is
+// still "coming soon" and renders the stage-tooltip popover below.
 const NAV_ITEMS: NavItem[] = [
-  { label: "Live", active: true },
+  { label: "Live", href: "/" },
   {
     label: "Timeline",
-    active: false,
     stage: "Stage 6",
     description: "Scrub back through any point in the retention window and replay it.",
   },
   {
     label: "Sandbox",
-    active: false,
     stage: "Stage 7",
     description:
       "Fork reality at a timestamp, inject a disruption, and diff the counterfactual against what actually happened.",
   },
-  {
-    label: "Scorecard",
-    active: false,
-    stage: "Stage 4",
-    description: "Live model accuracy - predicted vs. actual, updated as ground truth arrives.",
-  },
+  { label: "Scorecard", href: "/scorecard" },
 ];
 
 function ComingSoonItem({ item }: { item: NavItem }) {
@@ -129,8 +126,23 @@ function ParallaxLogo() {
   );
 }
 
+function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
+  const isActive = item.href === pathname;
+  return (
+    <Link
+      href={item.href!}
+      data-cursor-hover
+      className="rounded-md px-2 py-1 text-sm font-medium transition-colors"
+      style={{ color: isActive ? "var(--text-primary)" : "var(--text-tertiary)" }}
+    >
+      {item.label}
+    </Link>
+  );
+}
+
 export function Nav() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const pathname = usePathname();
 
   return (
     <header
@@ -150,15 +162,13 @@ export function Nav() {
       </div>
 
       <nav className="relative z-10 hidden items-center gap-1 sm:flex">
-        <span
-          className="rounded-md px-2 py-1 text-sm font-medium"
-          style={{ color: "var(--text-primary)" }}
-        >
-          Live
-        </span>
-        {NAV_ITEMS.slice(1).map((item) => (
-          <ComingSoonItem key={item.label} item={item} />
-        ))}
+        {NAV_ITEMS.map((item) =>
+          item.href ? (
+            <NavLink key={item.label} item={item} pathname={pathname} />
+          ) : (
+            <ComingSoonItem key={item.label} item={item} />
+          )
+        )}
       </nav>
 
       <button
@@ -198,23 +208,39 @@ export function Nav() {
             className="absolute left-0 right-0 top-full z-20 flex flex-col gap-1 border-b p-3 sm:hidden"
             style={{ background: "var(--bg-overlay-strong)", borderColor: "var(--border-default)", backdropFilter: "blur(12px)" }}
           >
-            <span className="px-2 py-2 text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-              Live
-            </span>
-            {NAV_ITEMS.slice(1).map((item) => (
-              <div key={item.label} className="rounded-md px-2 py-2" style={{ color: "var(--text-tertiary)" }}>
-                <div className="flex items-center gap-2 text-sm">
+            {NAV_ITEMS.map((item) =>
+              item.href ? (
+                <Link
+                  key={item.label}
+                  href={item.href}
+                  data-cursor-hover
+                  onClick={() => setMobileOpen(false)}
+                  className="rounded-md px-2 py-2 text-sm font-medium"
+                  style={{
+                    color: item.href === pathname ? "var(--text-primary)" : "var(--text-tertiary)",
+                  }}
+                >
                   {item.label}
-                  <span
-                    className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide"
-                    style={{ background: "var(--accent-gradient-soft)", color: "var(--accent-cyan)" }}
-                  >
-                    {item.stage}
-                  </span>
+                </Link>
+              ) : (
+                <div
+                  key={item.label}
+                  className="rounded-md px-2 py-2"
+                  style={{ color: "var(--text-tertiary)" }}
+                >
+                  <div className="flex items-center gap-2 text-sm">
+                    {item.label}
+                    <span
+                      className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide"
+                      style={{ background: "var(--accent-gradient-soft)", color: "var(--accent-cyan)" }}
+                    >
+                      {item.stage}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs leading-relaxed">{item.description}</p>
                 </div>
-                <p className="mt-0.5 text-xs leading-relaxed">{item.description}</p>
-              </div>
-            ))}
+              )
+            )}
           </motion.div>
         )}
       </AnimatePresence>

@@ -61,3 +61,30 @@ export function getAircraftTrack(icao24: string): Promise<AircraftState[]> {
 export function listAirports(): Promise<Airport[]> {
   return getJson<Airport[]>("/api/v1/airports");
 }
+
+export interface BucketMetrics {
+  mae_min: number;
+  p90_min: number;
+  n: number;
+}
+
+export interface ModelMetrics {
+  overall: BucketMetrics;
+  by_duration_bucket: Record<string, BucketMetrics>;
+}
+
+export interface ScorecardEntry {
+  kind: string;
+  model_version: string;
+  trained_at: string;
+  train_window: Record<string, unknown>;
+  metrics: {
+    baselines?: Record<string, ModelMetrics>;
+    lightgbm?: ModelMetrics;
+  };
+}
+
+export function getModelScorecard(model?: string): Promise<{ models: ScorecardEntry[] }> {
+  const params = model ? `?model=${encodeURIComponent(model)}` : "";
+  return getJson<{ models: ScorecardEntry[] }>(`/api/v1/models/scorecard${params}`);
+}
