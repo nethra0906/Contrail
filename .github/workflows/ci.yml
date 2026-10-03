@@ -16,7 +16,11 @@ jobs:
       - name: Install uv
         run: pip install uv
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        # ml extras are needed here, not just for ml/train/* scripts: several
+        # unit tests (chronological-split guard, ETA feature/dataset/report
+        # tests - see tests/unit/test_eta_*.py, test_chronological_split.py)
+        # import pandas/lightgbm transitively through ml/data and ml/eval.
+        run: uv pip install --system -e ".[dev,ml]"
       - name: Lint
         run: ruff check services ml tests scripts
       - name: Unit tests

@@ -37,7 +37,7 @@ fmt:
 	.venv/Scripts/ruff format services ml tests scripts
 
 typecheck:
-	.venv/Scripts/mypy services --ignore-missing-imports
+	.venv/Scripts/mypy services ml --ignore-missing-imports
 
 api-dev:
 	.venv/Scripts/uvicorn services.api.main:app --reload --port 8000
