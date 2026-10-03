@@ -60,3 +60,9 @@ SIM_RUNS_TOTAL = Counter(
     "contrail_sim_runs_total", "Simulation runs by terminal status", ["status"]
 )
 WS_CONNECTED_CLIENTS = Gauge("contrail_ws_connected_clients", "Live WebSocket connections")
+PARQUET_FLUSH_TOTAL = Counter(
+    "contrail_parquet_flush_total", "Assembler Parquet-sink flushes by outcome", ["outcome"]
+)
+PARQUET_FLUSH_ROWS_TOTAL = Counter(
+    "contrail_parquet_flush_rows_total", "Rows written to Parquet across all flushes"
+)

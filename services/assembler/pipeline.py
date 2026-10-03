@@ -38,6 +38,13 @@ class AssemblerState:
 
     tracks: dict[str, TrackState] = field(default_factory=dict)
     open_legs: dict[str, OpenLeg] = field(default_factory=dict)
+    # icao24 -> type_code, or None once looked up and found unknown. Presence
+    # of the key (not its value) means "already looked up" - see
+    # sinks/aircraft_registry.py.
+    known_types: dict[str, str | None] = field(default_factory=dict)
+    # icao24 -> ts of its last report sampled into the live fanout / Parquet
+    # sinks - see sampling.py.
+    last_sampled_ts: dict[str, dt.datetime] = field(default_factory=dict)
 
 
 def advance_track(sv: StateVectorIn, state: AssemblerState) -> TrackState:
