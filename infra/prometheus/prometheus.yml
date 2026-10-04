@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # Prometheus scraping itself - conventional, lets you see scrape health
+  # and Prometheus's own resource usage in the same place as everything else.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Contrail API - services/api/main.py mounts a real GET /metrics route
+  # (prometheus_client.generate_latest) on the same FastAPI app/port that
+  # serves the rest of the API, i.e. the "api" compose service on 8000.
+  - job_name: contrail-api
+    static_configs:
+      - targets: ["api:8000"]
+
+  # ingest and assembler are long-running asyncio workers (services/ingest/main.py,
+  # services/assembler/main.py) with no HTTP server of any kind - no FastAPI app,
+  # no prometheus_client.start_http_server() call, nothing listening on a port.
+  # assembler does set services.common.telemetry.CONSUMER_LAG (a Gauge) while it
+  # runs, and ingest increments INGEST_MESSAGES_TOTAL, but Prometheus client
+  # metrics only become scrapeable once something serves them over HTTP, and
+  # neither process does that today. So there is currently no target to add here
+  # for either service - this is a pre-existing gap in the app, not an omission
+  # in this config. To fix it: add `prometheus_client.start_http_server(PORT)`
+  # near the top of each worker's run()/main(), pick free ports, publish them in
+  # docker-compose.yml, and add scrape jobs here pointing at
+  # ingest:<port>/assembler:<port>.

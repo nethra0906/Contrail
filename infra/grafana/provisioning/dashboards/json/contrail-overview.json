@@ -1,0 +1,92 @@
+{
+  "id": null,
+  "uid": "contrail-overview",
+  "title": "Contrail Overview",
+  "description": "Minimal starter dashboard built from the metrics actually defined in services/common/telemetry.py.",
+  "tags": ["contrail"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Ingest messages/sec by source",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (source) (rate(contrail_ingest_messages_total[1m]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Ingest errors/sec by source and kind",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (source, kind) (rate(contrail_ingest_errors_total[1m]))",
+          "legendFormat": "{{source}}/{{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Kafka consumer lag (messages)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "contrail_consumer_lag_messages",
+          "legendFormat": "{{topic}}/{{group}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Live WebSocket connected clients",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "contrail_ws_connected_clients",
+          "legendFormat": "clients",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Parquet flushes/sec by outcome",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (rate(contrail_parquet_flush_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}
