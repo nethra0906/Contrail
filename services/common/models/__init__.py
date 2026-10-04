@@ -3,7 +3,9 @@ from services.common.models.airports import Airport, Runway
 from services.common.models.anomalies import Anomaly
 from services.common.models.flights import Flight
 from services.common.models.ml import ModelRegistry, Prediction, PredictionScore
-from services.common.models.simulation import ScenarioRow, SimRun, Snapshot
+from services.common.models.simulation import ScenarioRow, SimEvent, SimRun, Snapshot
+from services.common.models.trajectory import TrajectoryEmbedding
+from services.common.models.weather import WeatherObs
 
 __all__ = [
     "Aircraft",
@@ -16,6 +18,9 @@ __all__ = [
     "Prediction",
     "PredictionScore",
     "ScenarioRow",
+    "SimEvent",
     "SimRun",
     "Snapshot",
+    "TrajectoryEmbedding",
+    "WeatherObs",
 ]

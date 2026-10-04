@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from services.assembler.sinks.live_fanout import live_channel
 from services.common.cache import get_redis
+from services.common.config import get_settings
 from services.common.db import get_sessionmaker
 from services.common.telemetry import WS_CONNECTED_CLIENTS, get_logger
 from services.common.ws_protocol import FRAME_TYPE_FULL, AircraftRecord, encode_frame
@@ -32,7 +33,6 @@ logger = get_logger(__name__)
 # few hundred cells - cap the subscription so a pathological client can't
 # force the server to fan out (and this connection to receive) everything.
 MAX_SUBSCRIBED_CELLS = 300
-LIVE_STALENESS_SECONDS = 30
 
 
 async def build_full_frame(h3_cells: list[str]) -> bytes:
@@ -53,7 +53,7 @@ async def build_full_frame(h3_cells: list[str]) -> bytes:
                 ORDER BY icao24, ts DESC
                 """
             ),
-            {"staleness": LIVE_STALENESS_SECONDS, "cells": h3_cells},
+            {"staleness": get_settings().live_staleness_seconds, "cells": h3_cells},
         )
         records = [
             AircraftRecord(

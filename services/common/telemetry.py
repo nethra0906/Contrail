@@ -66,3 +66,6 @@ PARQUET_FLUSH_TOTAL = Counter(
 PARQUET_FLUSH_ROWS_TOTAL = Counter(
     "contrail_parquet_flush_rows_total", "Rows written to Parquet across all flushes"
 )
+ANOMALIES_DETECTED_TOTAL = Counter(
+    "contrail_anomalies_detected_total", "Anomalies detected by the rules layer", ["kind"]
+)

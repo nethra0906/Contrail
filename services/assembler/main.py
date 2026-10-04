@@ -27,6 +27,7 @@ from services.assembler.pipeline import (
 )
 from services.assembler.sampling import should_sample
 from services.assembler.sinks.aircraft_registry import type_code_for
+from services.assembler.sinks.anomalies import write_anomaly
 from services.assembler.sinks.enriched import publish_enriched
 from services.assembler.sinks.flights import write_closed_leg, write_opened_leg
 from services.assembler.sinks.live_fanout import publish_delta
@@ -37,7 +38,13 @@ from services.common.cache import get_redis
 from services.common.config import get_settings
 from services.common.db import get_sessionmaker
 from services.common.schemas.aircraft import StateVectorIn
-from services.common.telemetry import CONSUMER_LAG, configure_logging, get_logger
+from services.common.telemetry import (
+    ANOMALIES_DETECTED_TOTAL,
+    CONSUMER_LAG,
+    configure_logging,
+    get_logger,
+)
+from services.inference.anomaly_rules import check_all_rules
 
 logger = get_logger(__name__)
 
@@ -55,6 +62,7 @@ async def handle_message(
     sv = StateVectorIn(**{k: v for k, v in payload.items() if k != "h3_r5"})
     h3_cell = payload.get("h3_r5")
 
+    previous_track = state.tracks.get(sv.icao24)
     track = advance_track(sv, state)
 
     # Adaptive sampling (sampling.py): thins the live fanout and Parquet
@@ -80,6 +88,21 @@ async def handle_message(
         sv.vert_rate_fpm,
     )
     open_leg = state.open_legs.get(sv.icao24)
+
+    anomaly_events = check_all_rules(sv, previous_track, track)
+    if anomaly_events:
+        async with sessionmaker() as session:
+            for event in anomaly_events:
+                await write_anomaly(
+                    session,
+                    event,
+                    sv.icao24,
+                    sv.ts,
+                    flight_id=open_leg.flight_id if open_leg else None,
+                )
+        for event in anomaly_events:
+            ANOMALIES_DETECTED_TOTAL.labels(kind=event.kind.value).inc()
+
     await publish_enriched(
         events_producer,
         sv,

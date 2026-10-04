@@ -1,9 +1,11 @@
 """M4's deterministic rules layer (see docs/CONTRAIL_MASTER_SPEC.md §7,
 "Anomaly detection"). This runs on every state vector with no model and no
-training data, so it's live from Stage 3 onward; the learned autoencoder
-layer (Stage 5) adds a second, complementary score on top of this, and the
-spec requires reporting the learned layer's *lift* over rules alone - which
-means this rules layer has to exist, standalone and measurable, first.
+training data, and is called inline from the assembler's `handle_message`
+(services/assembler/main.py) on every message, persisting hits to the
+`anomalies` table; the learned autoencoder layer (Stage 5) adds a second,
+complementary score on top of this, and the spec requires reporting the
+learned layer's *lift* over rules alone - which means this rules layer has
+to exist, standalone and measurable, first.
 
 Each rule is intentionally simple and named after what a human would call it,
 because these labels are what the live anomaly feed shows a viewer and what

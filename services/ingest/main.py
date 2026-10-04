@@ -71,12 +71,14 @@ async def publish_batch(producer: AIOKafkaProducer, records: list[StateVectorIn]
 async def run() -> None:
     configure_logging()
     settings = get_settings()
-    # NOTE: default poll interval in .env.example is 5s, inherited from the
-    # original spec's assumption of a single fast bbox query. In practice a
-    # serialized 30-tile hub sweep against adsb.lol's real rate limit takes
-    # ~30s end to end (measured during development) - set
-    # INGEST_POLL_INTERVAL_SECONDS=30 in .env for hub mode, or reduce to a
-    # handful of tiles if you want sub-30s cadence.
+    # NOTE: the original spec assumed a single fast bbox query and a 5s poll
+    # interval. adsb.lol's real rate limit (see docs/adr/0003-hub-tiling.md,
+    # now on its third revision) forced a smaller 8-tile `core_hub_tiles()`
+    # default sweep at ~1 req/3s - the current INGEST_POLL_INTERVAL_SECONDS=90
+    # default in .env reflects that, not the original spec's assumption.
+    # services.common.config.Settings.live_staleness_seconds derives the live
+    # map's "is this data fresh enough to show" window from this same
+    # setting, so changing it here doesn't need a second edit elsewhere.
     poll_interval = settings.ingest_poll_interval_seconds
     source = AdsbLolSource()
     producer = await make_producer()

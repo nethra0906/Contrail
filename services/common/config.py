@@ -7,6 +7,7 @@ list of everything the system needs to run.
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,9 +60,46 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
 
+    @model_validator(mode="after")
+    def _forbid_insecure_defaults_outside_dev(self) -> "Settings":
+        if self.environment not in ("development", "test"):
+            if self.api_write_key == "dev-only-change-me":
+                raise ValueError(
+                    "api_write_key is still the insecure default 'dev-only-change-me' "
+                    f"while environment={self.environment!r}; set API_WRITE_KEY to a real "
+                    "secret before deploying outside development/test."
+                )
+            if self.minio_secret_key == "changeme":
+                raise ValueError(
+                    "minio_secret_key is still the insecure default 'changeme' while "
+                    f"environment={self.environment!r}; set MINIO_SECRET_KEY to a real "
+                    "secret before deploying outside development/test."
+                )
+        return self
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def live_staleness_seconds(self) -> float:
+        """How old a `state_vectors` row can be and still count as "live"
+        for the REST bbox query (`/api/v1/aircraft`) and the WS feed's
+        full-snapshot frame (`/ws/live`).
+
+        Tied to the actual ingest cadence rather than a fixed constant:
+        both call sites used to hardcode 30s, inherited from an early
+        assumption about how long one poll cycle takes. ADR 0003's
+        rate-limit retuning later pushed the real default poll interval to
+        90s (see `.env`'s `INGEST_POLL_INTERVAL_SECONDS`), which a fixed
+        30s staleness window doesn't know about - the live map would then
+        show empty or near-empty for roughly two-thirds of every poll
+        cycle even with ingest fully healthy (confirmed by running the
+        real stack end to end). The +30s margin absorbs a poll cycle
+        itself taking longer than the nominal interval (rate-limit
+        retries, a slow upstream response), which is routine in practice.
+        """
+        return self.ingest_poll_interval_seconds + 30.0
 
     @property
     def conus_bbox(self) -> tuple[float, float, float, float]:

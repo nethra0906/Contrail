@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -63,3 +63,17 @@ class SimRun(Base):
     error: Mapped[str | None] = mapped_column(String(512))
     worker_id: Mapped[str | None] = mapped_column(String(64))
     lease_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SimEvent(Base):
+    __tablename__ = "sim_events"
+    __table_args__ = (Index("ix_sim_events_run_id_t", "run_id", "t_offset_s"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sim_runs.run_id"), nullable=False
+    )
+    t_offset_s: Mapped[int] = mapped_column(Integer)
+    entity_id: Mapped[str] = mapped_column(String(64))
+    event_type: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict] = mapped_column(JSONB)

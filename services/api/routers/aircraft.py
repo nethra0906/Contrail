@@ -6,13 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.common.config import get_settings
 from services.common.db import get_session
 
 router = APIRouter(prefix="/aircraft", tags=["aircraft"])
-
-# Recency window for "currently visible" aircraft - anything older than this
-# is considered stale (feed dropout, aircraft landed and stopped squawking).
-LIVE_STALENESS_SECONDS = 30
 
 
 @router.get("")
@@ -47,7 +44,7 @@ async def list_aircraft(
     rows = await session.execute(
         query,
         {
-            "staleness": LIVE_STALENESS_SECONDS,
+            "staleness": get_settings().live_staleness_seconds,
             "min_lat": min_lat,
             "max_lat": max_lat,
             "min_lon": min_lon,
