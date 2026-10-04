@@ -9,8 +9,10 @@ its flagship capability - lets you fork reality at any past timestamp, inject
 a disruption (close a runway, drop capacity, inject a weather cell), simulate
 forward, and diff the counterfactual world against what actually happened.
 
-> **Status: early build.** Stage 1 (foundation), Stage 2 (live map MVP), and
-> the backend half of Stage 3 (streaming backbone) are implemented and
+> **Status: early build.** Stage 1 (foundation), Stage 2 (live map MVP), Stage
+> 3 (streaming backbone, end to end including the frontend's switch to the
+> binary `/ws/live` feed), and Stage 4's M2 ETA-regression model (trained on
+> real BTS data, served via `/api/v1/models/scorecard`) are implemented and
 > tested. See [Build status](#build-status) below for exactly what's real
 > today versus what's specified but not yet built. This
 > section will be replaced with real screenshots and a demo link once
@@ -87,40 +89,66 @@ what was *rejected* (Kubernetes, Neo4j, MongoDB, Airflow) and why.
   `/api/v1/airports`. Verified via `TestClient` - all routes register and
   respond correctly.
 - `frontend`: a real Next.js app - a GPU-rendered live map (deck.gl +
-  MapLibre) polling the API, with an aircraft detail panel showing track
-  history. Builds, typechecks, and lints clean. Still on the Stage 2 REST
-  polling path - not yet switched to the Stage 3 `/ws/live` feed below.
-- Stage 3 streaming backbone (backend half): `services/ingest` publishes
-  every normalized state vector to the `adsb.raw` Kafka (Redpanda) topic,
-  keyed by `icao24`, alongside its existing idempotent DB upsert; the new
+  MapLibre) with an aircraft detail panel showing track history. Builds,
+  typechecks, and lints clean. Switched from the Stage 2 REST-polling path
+  to the Stage 3 `/ws/live` binary feed: `frontend/src/lib/ws-client.ts`
+  subscribes to the H3 cells covering the current viewport, decodes the
+  binary frames, and keeps a live `icao24 -> AircraftState` map, replacing
+  the old polling loop entirely.
+- Stage 3 streaming backbone, now complete end to end: `services/ingest`
+  publishes every normalized state vector to the `adsb.raw` Kafka (Redpanda)
+  topic, keyed by `icao24`, alongside its existing idempotent DB upsert;
   `services/assembler` consumes that topic, runs the track-state machine
   (ground/climb/cruise/descent/approach) and leg detector on each aircraft's
   stream, resolves the nearest airport for takeoff/landing events, persists
-  opened/closed legs to `flights`, and fans live position deltas out over
-  Redis pub/sub, one channel per H3 (resolution-5) cell; `/ws/live` on the
+  opened/closed legs to `flights`, enriches each report with OpenAP-derived
+  fuel-flow estimates, and fans live position deltas out over Redis pub/sub,
+  one channel per H3 (resolution-5) cell. `services/assembler/sampling.py`
+  applies adaptive per-phase sampling to the live fanout and the Parquet
+  sink - every report during ground/climb/descent/approach, thinned to one
+  every 15s in steady cruise - while the Kafka log and the direct Timescale
+  write stay unthinned. `services/assembler/sinks/parquet.py` buffers state
+  vectors and periodically flushes them to MinIO as Parquet files, the
+  full-resolution archive once `state_vectors`' 6-hour Timescale retention
+  rolls off, which Stage 4's training loaders read from. `/ws/live` on the
   API subscribes a client to its viewport's cells, sends a full snapshot
   from `state_vectors` on connect, then forwards deltas as binary frames
   using the wire protocol in `services/common/ws_protocol.py`. Verified
   end-to-end against live ADS-B traffic with Docker up: ingest to Kafka to
   assembler to Redis to a real WebSocket client, consumer lag holding at
   zero across 800+ real messages, and real takeoff events correctly
-  resolving their departure airport (e.g. KATL, KORD). Not yet built:
-  Parquet cold-storage sink, adaptive per-phase sampling, and the frontend's
-  switch from polling to this feed.
+  resolving their departure airport (e.g. KATL, KORD).
 - `scripts/seed_reference_data.py`: pulls real airport + runway data from
   OurAirports, filtered to the CONUS bbox.
-- 125 passing unit tests: property-based geodesy tests (hypothesis), real
-  normalizer tests against a **recorded live API fixture**, a full
-  rejection-test suite for `ScenarioSpec` (every validation rule has a
-  test), the WS binary protocol's round-trip property test, and the
-  assembler's takeoff/landing/coverage-gap decision logic.
-- 3 integration tests (`tests/integration/`, require Docker + testcontainers)
-  proving the ingest write path is idempotent and the bbox query returns only
-  the latest position per aircraft.
+- Stage 4's M2 ETA regression (arrival delay) model, trained end to end on
+  real BTS TranStats data: a LightGBM model trained on 354,632 rows with a
+  chronological train/val/test split (84,840 test rows), beating both the
+  zero-delay baseline (8.89 min overall MAE) and the propagate-departure-delay
+  baseline (3.41 min overall MAE) with an overall test MAE of **2.92 minutes**
+  (P90 absolute error 10.03 min). Full bucketed metrics are in
+  [`docs/ml-report.md`](docs/ml-report.md), regenerated from `ml/eval/`
+  training-run metrics, never hand-entered. The model is live-served via
+  `GET /api/v1/models/scorecard` (`services/api/routers/models.py`), which
+  returns the currently-promoted model per kind with its metrics, and
+  rendered on the `/scorecard` frontend page.
+- 163 passing unit tests (`tests/unit/`, no external dependencies): property-based
+  geodesy tests (hypothesis), real normalizer tests against a **recorded live
+  API fixture**, a full rejection-test suite for `ScenarioSpec` (every
+  validation rule has a test), the WS binary protocol's round-trip property
+  test, and the assembler's takeoff/landing/coverage-gap decision logic.
+- 6 integration tests (`tests/integration/`, require Docker + testcontainers):
+  3 proving the ingest write path is idempotent and the bbox query returns
+  only the latest position per aircraft, plus 3 covering the models-scorecard
+  endpoint (promoted-only filtering, filtering by model kind, and the
+  empty-scorecard case).
+- 3 golden determinism tests (`tests/golden/`): the simulator's scenario
+  output is byte-identical across repeated runs with the same seed, different
+  seeds produce different jitter, and landing order is deterministic and
+  matches arrival order.
 
 **Specified, not yet built** (see `docs/CONTRAIL_MASTER_SPEC.md` §9 for the
-full 10-stage plan): the ML models - trajectory forecasting, ETA,
-delay-propagation GNN, anomaly detection (Stage 4-5), the
+full 10-stage plan): the remaining ML models - trajectory forecasting (M1)
+and the delay-propagation GNN (M3), plus anomaly detection (Stage 4-5), the
 timeline/time-machine (Stage 6), and the counterfactual simulation sandbox -
 the flagship feature (Stage 7).
 
@@ -169,8 +197,8 @@ make frontend-dev   # Next.js dev server on :3000
 ### Tests
 
 ```bash
-make test-unit          # 34 tests, no external dependencies, ~1s
-make test-integration    # requires Docker; testcontainers spins up real Timescale
+make test-unit          # 163 tests, no external dependencies, ~1s
+make test-integration    # 6 tests, requires Docker; testcontainers spins up real Timescale
 ```
 
 ### Lint / format / typecheck
@@ -213,6 +241,23 @@ tests/               unit / integration / e2e / golden (determinism)
 docs/                the master spec, ADRs, and (as stages land) architecture,
                       API, and ML methodology docs
 ```
+
+## Documentation
+
+- [`docs/LEARNING_GUIDE.md`](docs/LEARNING_GUIDE.md) — start here: what this project does,
+  why, how it works, and an honest accounting of what's built versus what isn't.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — every major technology choice, with the
+  alternatives considered and why.
+- [`docs/CODEBASE_WALKTHROUGH.md`](docs/CODEBASE_WALKTHROUGH.md) — file-by-file tour.
+- [`docs/DATA_FLOWS.md`](docs/DATA_FLOWS.md) — step-by-step traces of the live map,
+  ML training, and flight-lifecycle paths.
+- [`docs/INTERVIEW_PREP.md`](docs/INTERVIEW_PREP.md) — how to explain this project out loud.
+- [`docs/RUNNING_GUIDE.md`](docs/RUNNING_GUIDE.md) — every setup/run/test/build command,
+  verified against a real run of the full stack.
+- [`docs/CONTRAIL_MASTER_SPEC.md`](docs/CONTRAIL_MASTER_SPEC.md) — the original full design
+  spec and 10-stage build plan.
+- [`docs/adr/`](docs/adr/) — Architecture Decision Records for real deviations made during
+  development.
 
 ## License
 
