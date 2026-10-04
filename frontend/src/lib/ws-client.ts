@@ -12,7 +12,7 @@
  * requested cell set changes, which is cheap at this scale.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as h3 from "h3-js";
 import type { AircraftState, Bbox } from "./api-client";
 import { decodeFrame, FRAME_TYPE_FULL, type AircraftRecord } from "./ws-protocol";
@@ -28,8 +28,19 @@ const RECONNECT_MAX_DELAY_MS = 15000;
 
 export type LiveFeedStatus = "connecting" | "live" | "error";
 
+function resolveApiBase(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (!configured && process.env.NODE_ENV === "production") {
+    console.warn(
+      "NEXT_PUBLIC_API_BASE_URL is not set in this production build - falling back to " +
+        "http://localhost:8000, which will not reach the real API for deployed visitors."
+    );
+  }
+  return configured ?? "http://localhost:8000";
+}
+
 function wsUrl(path: string): string {
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+  const apiBase = resolveApiBase();
   return apiBase.replace(/^http/, "ws") + path;
 }
 
@@ -40,7 +51,15 @@ export function bboxToH3Cells(bbox: Bbox, resolution = H3_LIVE_RESOLUTION): stri
     [bbox.maxLat, bbox.maxLon],
     [bbox.maxLat, bbox.minLon],
   ];
-  return h3.polygonToCells(polygon, resolution).slice(0, MAX_SUBSCRIBED_CELLS);
+  try {
+    return h3.polygonToCells(polygon, resolution).slice(0, MAX_SUBSCRIBED_CELLS);
+  } catch {
+    // h3's polygonToCells throws on a zero-area (degenerate) polygon, e.g. a
+    // bbox collapsed to a point or a line. Fall back to the single cell
+    // containing the bbox's corner so a transient degenerate viewport
+    // doesn't throw during render - the next real bbox update corrects it.
+    return [h3.latLngToCell(bbox.minLat, bbox.minLon, resolution)];
+  }
 }
 
 function toAircraftState(r: AircraftRecord): AircraftState {
@@ -69,7 +88,13 @@ export function useLiveAircraftFeed(bbox: Bbox): LiveFeed {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const trackedRef = useRef<Map<string, AircraftState>>(new Map());
 
-  const cells = bboxToH3Cells(bbox);
+  // Keyed on the bbox's primitive fields (not the Bbox object identity) so a
+  // newly-constructed-but-equal bbox from the store doesn't bust the memo.
+  const cells = useMemo(
+    () => bboxToH3Cells(bbox),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon],
+  );
   const cellsKey = cells.join(",");
 
   useEffect(() => {
@@ -93,7 +118,8 @@ export function useLiveAircraftFeed(bbox: Bbox): LiveFeed {
         let frame;
         try {
           frame = decodeFrame(event.data);
-        } catch {
+        } catch (err) {
+          console.error("ws_frame_decode_failed", err);
           return;
         }
 
@@ -110,7 +136,15 @@ export function useLiveAircraftFeed(bbox: Bbox): LiveFeed {
         setStatus("live");
       };
 
-      socket.onerror = () => {
+      socket.onerror = (event) => {
+        // console.warn, not console.error: a dropped connection is routine
+        // (server restart, network blip) and already self-heals via the
+        // reconnect-with-backoff below - console.error here would trip
+        // Next.js's dev-mode error overlay on every normal reconnect cycle,
+        // confirmed by actually running this against the live stack.
+        // decodeFrame's failure above stays console.error: that one means
+        // the wire format itself is broken, not a transient connection drop.
+        console.warn("ws_connection_error", event);
         setStatus("error");
       };
 

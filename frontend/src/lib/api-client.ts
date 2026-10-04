@@ -4,7 +4,18 @@
  * frontend, not a runtime surprise.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+function resolveApiBase(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (!configured && process.env.NODE_ENV === "production") {
+    console.warn(
+      "NEXT_PUBLIC_API_BASE_URL is not set in this production build - falling back to " +
+        "http://localhost:8000, which will not reach the real API for deployed visitors."
+    );
+  }
+  return configured ?? "http://localhost:8000";
+}
+
+const API_BASE = resolveApiBase();
 
 export interface AircraftState {
   icao24: string;
@@ -16,16 +27,6 @@ export interface AircraftState {
   heading_deg: number | null;
   vert_rate_fpm: number | null;
   on_ground: boolean;
-}
-
-export interface Airport {
-  icao: string;
-  iata: string | null;
-  name: string;
-  city: string | null;
-  lat: number;
-  lon: number;
-  hub_rank: number | null;
 }
 
 export interface Bbox {
@@ -43,23 +44,8 @@ async function getJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function listAircraft(bbox: Bbox, limit = 2000): Promise<AircraftState[]> {
-  const params = new URLSearchParams({
-    min_lat: String(bbox.minLat),
-    max_lat: String(bbox.maxLat),
-    min_lon: String(bbox.minLon),
-    max_lon: String(bbox.maxLon),
-    limit: String(limit),
-  });
-  return getJson<AircraftState[]>(`/api/v1/aircraft?${params}`);
-}
-
 export function getAircraftTrack(icao24: string): Promise<AircraftState[]> {
   return getJson<AircraftState[]>(`/api/v1/aircraft/${icao24}/track`);
-}
-
-export function listAirports(): Promise<Airport[]> {
-  return getJson<Airport[]>("/api/v1/airports");
 }
 
 export interface BucketMetrics {

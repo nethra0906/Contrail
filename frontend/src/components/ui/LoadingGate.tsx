@@ -18,7 +18,13 @@ export function LoadingGate({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const timer = setTimeout(() => setReady(true), MIN_DISPLAY_MS);
+    // Respect prefers-reduced-motion: the forced minimum display exists only
+    // to let the branded loader's motion play out (see MIN_DISPLAY_MS doc
+    // above), so a viewer who has asked for reduced motion gets no
+    // artificial delay at all, matching ParticleField's own motion check.
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const delay = prefersReducedMotion ? 0 : MIN_DISPLAY_MS;
+    const timer = setTimeout(() => setReady(true), delay);
     return () => clearTimeout(timer);
   }, []);
 
