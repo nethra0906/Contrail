@@ -73,9 +73,7 @@ def estimate_fuel_flow_kg_s(
     mass_kg = limits["OEW"] + 0.5 * (limits["MTOW"] - limits["OEW"])
 
     try:
-        flow = fuelflow.enroute(
-            mass=mass_kg, tas=velocity_kt, alt=alt_ft, vs=vert_rate_fpm or 0
-        )
+        flow = fuelflow.enroute(mass=mass_kg, tas=velocity_kt, alt=alt_ft, vs=vert_rate_fpm or 0)
     except Exception:
         logger.exception("openap_fuel_flow_failed", type_code=type_code)
         return None

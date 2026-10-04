@@ -66,7 +66,36 @@ async def db_engine(timescale_container):
 
 
 @pytest_asyncio.fixture
-async def db_session(db_engine):
-    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
-    async with sessionmaker() as session:
+async def db_sessionmaker(db_engine):
+    """A sessionmaker bound to one connection wrapped in an outer
+    transaction + SAVEPOINT (`join_transaction_mode="create_savepoint"`):
+    test code (and any production code under test that calls
+    `session.commit()`, e.g. `ml/export/register.py`) only ever releases a
+    SAVEPOINT, never the real outer transaction, so everything written
+    during a test is rolled back when the test ends.
+
+    This matters because `timescale_container`/`db_engine` are shared
+    across every test in the session (recreating a TimescaleDB container
+    and re-running the full Alembic chain per test would be far too slow)
+    - without this, data written by one test (e.g. a promoted
+    `ModelRegistry` row) would leak into every test that runs after it in
+    the same session, regardless of which file it's in. Any test that
+    monkeypatches a module's `get_sessionmaker` to point at the test
+    database (rather than using the `db_session` fixture directly) must
+    point it at *this* fixture, not at a sessionmaker built fresh from
+    `db_engine`, or its writes bypass the rollback and leak like the ones
+    above did.
+    """
+    async with db_engine.connect() as conn:
+        outer_transaction = await conn.begin()
+        sessionmaker = async_sessionmaker(
+            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
+        yield sessionmaker
+        await outer_transaction.rollback()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_sessionmaker):
+    async with db_sessionmaker() as session:
         yield session

@@ -73,9 +73,7 @@ async def register_and_maybe_promote(report: dict) -> bool:
 
         if incumbent is None:
             promoted = True
-            logger.info(
-                "model_promoted", version=report["model_version"], reason="no incumbent"
-            )
+            logger.info("model_promoted", version=report["model_version"], reason="no incumbent")
         else:
             incumbent_metric = _primary_metric(incumbent.metrics)
             promoted = new_metric < incumbent_metric
@@ -91,9 +89,7 @@ async def register_and_maybe_promote(report: dict) -> bool:
                 incumbent.promoted = False
 
         if promoted:
-            new_row = await session.get(
-                ModelRegistry, report["model_version"]
-            )
+            new_row = await session.get(ModelRegistry, report["model_version"])
             assert new_row is not None
             new_row.promoted = True
 

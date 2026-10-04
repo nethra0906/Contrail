@@ -26,9 +26,7 @@ from services.assembler.track_state import Phase
 CRUISE_SAMPLE_INTERVAL_SECONDS = 15.0
 
 
-def should_sample(
-    phase: Phase, last_sampled_ts: dt.datetime | None, ts: dt.datetime
-) -> bool:
+def should_sample(phase: Phase, last_sampled_ts: dt.datetime | None, ts: dt.datetime) -> bool:
     """Whether this tick should go to the live fanout / Parquet sinks.
 
     `last_sampled_ts` is the ts of this aircraft's last *sampled* report

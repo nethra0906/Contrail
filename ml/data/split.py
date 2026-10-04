@@ -52,6 +52,4 @@ def chronological_split(
     val = df.loc[(ts >= train_end) & (ts < val_end)]
     test = df.loc[ts >= val_end]
 
-    return ChronologicalSplit(
-        train=train, val=val, test=test, train_end=train_end, val_end=val_end
-    )
+    return ChronologicalSplit(train=train, val=val, test=test, train_end=train_end, val_end=val_end)

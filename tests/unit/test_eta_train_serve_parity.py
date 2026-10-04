@@ -109,6 +109,5 @@ def test_build_feature_table_matches_calling_compute_eta_features_directly():
         )
         for col in FEATURE_COLUMNS:
             assert table.loc[i, col] == getattr(expected, col), (
-                f"row {i} column {col!r}: dataset builder diverged from "
-                f"compute_eta_features"
+                f"row {i} column {col!r}: dataset builder diverged from compute_eta_features"
             )
