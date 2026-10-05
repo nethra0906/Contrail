@@ -25,16 +25,54 @@ from services.common.telemetry import get_logger
 logger = get_logger(__name__)
 
 # Lower is better for every metric this project reports (MAE, P90 abs
-# error) - a model kind whose primary metric is "higher is better" would
-# need its own comparison direction here, not a blanket assumption.
-_PRIMARY_METRIC_PATH = ("lightgbm", "overall", "mae_min")
+# error, median horizontal error) - a model kind whose primary metric is
+# "higher is better" would need its own comparison direction here, not a
+# blanket assumption. One path per `report["kind"]` - keyed by kind rather
+# than a single shared path, since M1's report shape (per-horizon errors,
+# no single "mae_min") is genuinely different from M2's.
+_PRIMARY_METRIC_PATHS: dict[str, tuple[str, ...]] = {
+    "eta": ("lightgbm", "overall", "mae_min"),
+    "trajectory": ("model", "overall_median_error_km"),
+    "network": ("model", "overall_mae_min"),
+    # Reconstruction error, not the rule-agreement PR-AUC/precision@k: those
+    # are measured against a tiny, highly imbalanced positive count in the
+    # current training window (see docs/adr/0004) and are too noisy to use
+    # as a promotion gate; reconstruction MAE is always computed on the full
+    # test set and lower is unambiguously better, consistent with every
+    # other kind's primary metric.
+    "anomaly": ("model", "reconstruction_mae"),
+}
 
 
-def _primary_metric(report: dict) -> float:
-    value: Any = report
-    for key in _PRIMARY_METRIC_PATH:
+def _primary_metric(metrics: dict, kind: str) -> float:
+    """`metrics` is either a full training-run report (which has extra keys
+    like model_version/trained_at alongside the metric fields) or the
+    narrower dict stored in model_registry.metrics (see _metrics_payload) -
+    both shapes contain whatever `_PRIMARY_METRIC_PATHS[kind]` points at,
+    so one function serves both the new-run and incumbent-lookup call
+    sites. `kind` is passed explicitly rather than read from the dict
+    itself because the stored incumbent.metrics payload deliberately
+    doesn't duplicate `kind` (it's already a column on the row).
+    """
+    if kind not in _PRIMARY_METRIC_PATHS:
+        raise ValueError(f"no primary-metric path registered for model kind {kind!r}")
+    value: Any = metrics
+    for key in _PRIMARY_METRIC_PATHS[kind]:
         value = value[key]
     return float(value)
+
+
+# Columns already stored separately on the ModelRegistry row - excluded from
+# the JSONB `metrics` payload so the metrics a kind actually reports (and
+# nothing else) is what both _primary_metric and ml/eval/report.py's
+# renderers see, without per-kind special-casing which report fields count
+# as "metrics" (M2's report has "baselines"/"lightgbm"; M1's has
+# "baseline"/"model"/"interval_coverage_80" - this generalizes over both).
+_NON_METRIC_REPORT_FIELDS = {"model_version", "kind", "trained_at", "train_window", "artifact_path"}
+
+
+def _metrics_payload(report: dict) -> dict:
+    return {k: v for k, v in report.items() if k not in _NON_METRIC_REPORT_FIELDS}
 
 
 async def _incumbent(session: AsyncSession, kind: str) -> ModelRegistry | None:
@@ -53,18 +91,19 @@ async def register_and_maybe_promote(report: dict) -> bool:
     model on the primary metric. Returns whether it was promoted.
     """
     sessionmaker = get_sessionmaker()
-    new_metric = _primary_metric(report)
+    kind = report["kind"]
+    new_metric = _primary_metric(report, kind)
 
     async with sessionmaker() as session:
-        incumbent = await _incumbent(session, report["kind"])
+        incumbent = await _incumbent(session, kind)
 
         session.add(
             ModelRegistry(
                 model_version=report["model_version"],
-                kind=report["kind"],
+                kind=kind,
                 trained_at=dt.datetime.fromisoformat(report["trained_at"]),
                 train_window=report["train_window"],
-                metrics={"baselines": report["baselines"], "lightgbm": report["lightgbm"]},
+                metrics=_metrics_payload(report),
                 artifact_uri=report["artifact_path"],
                 promoted=False,
             )
@@ -75,7 +114,7 @@ async def register_and_maybe_promote(report: dict) -> bool:
             promoted = True
             logger.info("model_promoted", version=report["model_version"], reason="no incumbent")
         else:
-            incumbent_metric = _primary_metric(incumbent.metrics)
+            incumbent_metric = _primary_metric(incumbent.metrics, kind)
             promoted = new_metric < incumbent_metric
             logger.info(
                 "model_promotion_decision",

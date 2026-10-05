@@ -21,6 +21,8 @@ seed:
 train:
 	.venv/Scripts/python -m ml.train.train_trajectory
 	.venv/Scripts/python -m ml.train.train_eta
+	.venv/Scripts/python -m ml.train.train_delay_gnn
+	.venv/Scripts/python -m ml.train.train_autoencoder
 
 test: test-unit
 
