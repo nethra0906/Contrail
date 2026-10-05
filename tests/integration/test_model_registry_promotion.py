@@ -17,15 +17,23 @@ from services.common.models.ml import ModelRegistry
 
 
 def _report(version: str, mae: float, kind: str = "eta") -> dict:
-    return {
+    base = {
         "kind": kind,
         "model_version": version,
         "trained_at": dt.datetime(2026, 1, 1, tzinfo=dt.UTC).isoformat(),
         "train_window": {"months": [[2024, 1]]},
-        "baselines": {"scheduled": {"overall": {"mae_min": 9.0}}},
-        "lightgbm": {"overall": {"mae_min": mae}},
         "artifact_path": f"data/models/{version}.txt",
     }
+    # Each kind's primary-metric path (ml/export/register.py's
+    # _PRIMARY_METRIC_PATHS) points at a different shape - "eta" reads
+    # lightgbm.overall.mae_min, "trajectory" reads model.overall_median_error_km.
+    if kind == "trajectory":
+        base["baseline"] = {"per_horizon": {}}
+        base["model"] = {"overall_median_error_km": mae}
+    else:
+        base["baselines"] = {"scheduled": {"overall": {"mae_min": 9.0}}}
+        base["lightgbm"] = {"overall": {"mae_min": mae}}
+    return base
 
 
 @pytest.fixture
