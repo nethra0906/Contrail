@@ -34,9 +34,12 @@ counterfactual against what actually happened.
 
 **Where the project actually is today:** that counterfactual sandbox is designed (in
 detail — see `docs/CONTRAIL_MASTER_SPEC.md`) but not yet built. What *is* built and
-genuinely working is the foundation underneath it: real live data ingestion, a streaming
-pipeline, and the first trained ML model (arrival-delay prediction). Section 17 is honest
-about exactly where that line is.
+genuinely working is everything underneath it: real live data ingestion, a streaming
+pipeline, and all five of the "Network Intelligence" models (Stage 5) — arrival-delay
+prediction, trajectory forecasting, delay-propagation across the airport network,
+anomaly detection, and conflict-probability estimation — each trained on real data with
+real, honestly-reported baselines. Section 17 is honest about exactly where the line to
+the still-unbuilt simulator sits.
 
 ## 3. What does a user actually do with it?
 
@@ -206,15 +209,22 @@ and what that means).
 | GET | `/api/v1/aircraft?min_lat&max_lat&min_lon&max_lon` | Latest position per aircraft inside a bounding box, within the live-staleness window. |
 | GET | `/api/v1/aircraft/{icao24}` | One aircraft's latest known state. |
 | GET | `/api/v1/aircraft/{icao24}/track?from&to` | Historical position history, time-ranged. |
+| GET | `/api/v1/aircraft/{icao24}/prediction` | M1's quantile position forecast ("uncertainty cone") for a tracked aircraft at each horizon, 60s-900s out. |
 | GET | `/api/v1/airports` | All seeded CONUS airports. |
 | GET | `/api/v1/airports/{icao}` | One airport plus its runways. |
+| GET | `/api/v1/airports/{icao}/delay-forecast` | M3's per-airport arrival-delay forecast, t+1h through t+6h. |
+| GET | `/api/v1/anomalies?since_minutes&kind=` | Recently detected anomalies (emergency squawk, rapid descent, go-around) from the now-wired rules layer. |
+| GET | `/api/v1/conflicts?bbox=&min_prob=` | M5's candidate conflict pairs in a bounding box, scored by Monte Carlo sampling from M1's predictions. |
 | GET | `/api/v1/models/scorecard?model=` | The currently-promoted model(s) and their real evaluation metrics. |
 | GET | `/metrics` | Prometheus scrape target. |
 | WS | `/ws/live` | Subscribe (`{"op":"subscribe","h3_cells":[...]}`), receive binary FULL then DELTA frames. |
 
-Every one of these was hit against the real running stack (not just read from source)
-during this session's verification pass — including a real WebSocket client decoding real
-binary frames of real aircraft over San Antonio.
+The aircraft/airports/models/WS endpoints were hit against the real running stack
+(not just read from source) during an earlier verification pass — including a real
+WebSocket client decoding real binary frames of real aircraft over San Antonio. The
+Stage 5 endpoints (`/prediction`, `/delay-forecast`, `/anomalies`, `/conflicts`) are
+new and exercise real trained models; see [Data flows](DATA_FLOWS.md) for their
+request-to-response traces.
 
 ## 11. Database
 
@@ -232,16 +242,28 @@ exists for the not-yet-built simulator).
 retention policies): `state_vectors` (every position report — the highest-volume table by
 far, with two pre-computed rollups, `state_vectors_15s` and `state_vectors_60s`, for cheap
 aggregate queries), `weather_obs` (schema exists, nothing writes to it yet — no weather
-ingestion is built), `predictions` / `prediction_scores` (schema exists for live model
-serving, which doesn't exist yet either).
+ingestion is built), `predictions` / `prediction_scores` (schema exists for a *persisted,
+scored* prediction history — join live predictions against the ground truth that arrives
+later, the mechanism that would power a continuously-updating scorecard. M1/M3 live
+serving exists now as real-time, compute-on-request API endpoints, which is a genuinely
+different mechanism — neither writes to these two tables yet, so there's still no
+historical record of "how good was last week's prediction," only "how good was the model
+at training time" (`/api/v1/models/scorecard`) and "what does it predict right now"
+(`/prediction`, `/delay-forecast`)).
 
 **Why this matters for understanding the project's actual maturity:** the presence of a
 table in the schema is not evidence a feature is built. `weather_obs`, `predictions`,
-`sim_events`, and `trajectory_embeddings` all exist in the database today with real columns
-and, since this session, real ORM models — and zero rows, because nothing writes to them
-yet. That's intentional forward schema design (per the master spec), not a hidden gap, but
-it's worth being precise about the difference between "the table exists" and "the feature
-works."
+`prediction_scores`, and `sim_events` exist in the database today with real columns and
+real ORM models — and zero rows, because nothing writes to them yet.
+`trajectory_embeddings` is similar with one added wrinkle: M4's autoencoder now computes
+real 64-dimensional embeddings, but doesn't write them here — that table's `flight_id`
+column has a real foreign key to `flights`, and the historical training data M4 uses has
+no corresponding `flights` row to attach an embedding to (see
+`ml/train/train_autoencoder.py`'s own comment on this) — so embeddings are saved as a
+plain `.npz` artifact alongside the model instead. All of this is intentional forward
+schema design (per the master spec) or a real, documented live/historical-data mismatch,
+not a hidden gap — but it's worth being precise about the difference between "the table
+exists" and "the feature writes to it."
 
 ## 12. Authentication & security
 
@@ -348,19 +370,39 @@ This section is the most important one to read before claiming anything about th
 in an interview — overclaiming what's built is the fastest way to lose credibility once
 someone asks a follow-up question.
 
-- **Only one ML model is actually trained and working: M2, arrival-delay regression.**
-  Trajectory forecasting (M1) is an explicit, labeled stub. Delay-propagation (M3, a graph
-  neural network) and anomaly scoring beyond the rules layer (M4's learned component) don't
-  exist at all yet.
-- **No live model *serving* exists for any model** — `/api/v1/models/scorecard` reports
-  training-time metrics for the currently-promoted model. There is no endpoint that takes a
-  flight and returns a live predicted ETA. The `predictions`/`prediction_scores` tables
-  exist in the schema; nothing writes to them.
+- **All five Stage 4/5 models are trained end to end on real data: M1 (trajectory), M2
+  (ETA), M3 (delay propagation), M4 (anomaly), M5 (conflict probability).** Each has real
+  baselines and real, honestly-reported metrics in `docs/ml-report.md` — including M4,
+  whose real result is unflattering (near-chance agreement with the rules layer on a
+  sample with only 6 positive examples) and is reported as such, not improved-looking.
+  What's genuinely *not* built: M3's live-weather node features (no weather-ingestion
+  pipeline exists — see ADR 0004), and M1/M4 train on a historical ADS-B Exchange sample
+  rather than this project's own live-ingested history, which hasn't run long enough yet
+  to accumulate the volume a sequence model needs (also ADR 0004).
+- **M1's GRU does not beat its own required baseline.** Constant-velocity dead reckoning
+  (0.38/1.57/3.24 km median error at 60s/180s/300s) beats the trained GRU (9.67/29.27/49.22
+  km) at every horizon with test coverage — real aircraft in cruise are close enough to
+  constant-velocity over these short horizons that dead reckoning is a genuinely strong
+  baseline, and one hour of training data wasn't enough for the GRU to clear it. 600s/900s
+  report nothing (zero valid test windows from a one-hour window). See
+  [ADR 0004's addendum](adr/0004-historical-trajectory-data-source.md) for the full
+  writeup — reported as the real result, not tuned until it looked better.
+- **Live model *serving* now exists for M1 and M3**: `/api/v1/aircraft/{icao24}/prediction`
+  (ONNX, real uncertainty cones from recent `state_vectors` history) and
+  `/api/v1/airports/{icao}/delay-forecast` (the trained GNN, real current network
+  features from `flights`). Two honest caveats: M3's live features reflect ops-count and
+  calendar signal only, not delay (the live pipeline doesn't populate scheduled-time
+  delay fields — see `services/inference/network.py`'s docstring), and both endpoints
+  return 404, not a fabricated prediction, when there isn't enough real input to compute
+  one from. M2's ETA model still has no live-serving endpoint — `/api/v1/models/scorecard`
+  reports its training-time metrics only.
 - **The counterfactual simulator — the project's stated flagship feature — doesn't exist
   yet.** Only two low-level primitives are built (a deterministic event clock, a single-
   runway queueing model) plus scenario-spec validation. There's no simulation engine, no
   API surface, no worker process, and no frontend beyond an honest "coming soon" nav item.
-  The time-machine/snapshot feature is in the same state.
+  The time-machine/snapshot feature is in the same state. M3's delay-propagation model is
+  the piece Stage 7's simulator will eventually couple to a discrete-event layer — it
+  exists and works standalone today, but that coupling hasn't been built.
 - **No authentication on any endpoint**, though this is currently low-risk since the API is
   entirely read-only — see §12.
 - **Two backend services (`ingest`, `assembler`) define Prometheus metrics but don't
@@ -387,29 +429,38 @@ someone asks a follow-up question.
 ## 18. Future improvements, realistically
 
 **High priority** (blocks the project's stated flagship capability, or closes a real gap
-found this session):
-- Build the M1 trajectory model and a live-serving path for it — needed before M3 (delay
-  propagation) can be meaningfully built on top, since M3's graph features depend on
-  trajectory predictions.
+found building Stage 5):
 - Build the actual simulation engine (`services/simulator/`) on top of the existing DES
-  primitives — this is the single largest piece of work standing between the current state
-  and the project's stated flagship feature.
+  primitives, coupling it to M3's now-working delay-propagation model as the spec's
+  hybrid DES+GNN design calls for — this is the single largest piece of work standing
+  between the current state and the project's stated flagship feature.
+- Give M3 live weather features — the model trains and serves without them today
+  (ADR 0004); a NOAA Aviation Weather ingestion pipeline (feeding both live serving and
+  future retraining) would likely improve forecast accuracy specifically during the
+  weather-driven delay events that matter most.
+- Accumulate enough of this project's own live-ingested trajectory history to retrain M1
+  (and M4) against it instead of a one-hour historical sample — real live data, running
+  for real wall-clock days/weeks, not a one-time snapshot.
 - Expose `/metrics` over HTTP from `ingest` and `assembler` so the Grafana dashboards this
-  session built actually show live data for consumer lag, ingest error rate, and Parquet
+  project built actually show live data for consumer lag, ingest error rate, and Parquet
   flush health — real operational blind spots right now.
 - Add `tests/integration` and `tests/golden` to CI — they currently only run locally, which
-  is exactly how this session's integration-test isolation bug went undetected.
+  is exactly how an earlier integration-test isolation bug went undetected before it was
+  found and fixed.
 
 **Medium priority:**
-- A real `/api/v1/anomalies` endpoint and Kafka publish for the now-wired anomaly rules
-  layer, so detected anomalies are actually consumable outside the database.
 - A registry-backfill job for `aircraft.type_code`, so OpenAP fuel enrichment (built,
   tested, but mostly returning `None` today for lack of a known type) starts producing real
-  numbers for most aircraft.
+  numbers for most aircraft — this would also give M1's WTC (wake-turbulence category)
+  feature real values instead of mostly "unknown" for live-served predictions.
 - Basic API rate limiting and a circuit breaker around the database/Redis calls in `api`,
   so a dependency outage degrades gracefully instead of surfacing as a generic 500.
 - A frontend end-to-end test suite (Playwright), since the live map and WebSocket
-  reconnection logic currently have zero coverage beyond manual/this-session's verification.
+  reconnection logic currently have zero coverage beyond manual verification.
+- A larger, more varied M4 evaluation sample — 6 positive examples (rule-flagged segments)
+  out of 1027 is too few to draw a real conclusion about the learned layer's quality one
+  way or the other; a longer or multi-day ADS-B Exchange sample would give a more
+  statistically meaningful rule-agreement check.
 
 **Low priority** (real, but lower-impact or lower-urgency):
 - Multi-replica support for `assembler` (externalize its in-process state) — only matters

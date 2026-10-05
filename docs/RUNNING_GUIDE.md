@@ -217,16 +217,24 @@ npm start   # serves the production build
 
 ```bash
 make train
-# runs, in order:
-#   .venv/Scripts/python.exe -m ml.train.train_trajectory   (M1 — logs "not yet implemented", exits)
-#   .venv/Scripts/python.exe -m ml.train.train_eta           (M2 — the real training run)
+# runs, in order, all four real training scripts:
+#   .venv/Scripts/python.exe -m ml.train.train_trajectory   (M1 - GRU, ~10-20 min on CPU)
+#   .venv/Scripts/python.exe -m ml.train.train_eta           (M2 - LightGBM, a few minutes)
+#   .venv/Scripts/python.exe -m ml.train.train_delay_gnn     (M3 - GNN, ~5-10 min on CPU)
+#   .venv/Scripts/python.exe -m ml.train.train_autoencoder   (M4 - autoencoder, ~5 min)
 ```
-Expected for `train_eta`: downloads a month of BTS flight data on first run (~a few
-hundred MB, cached under `data/raw/bts/` afterward), trains a LightGBM model, logs baseline
-and model MAE, writes `data/models/eta-lgbm-<timestamp>.{txt,metrics.json}`, regenerates
-`docs/ml-report.md`'s machine-generated section, and — if Postgres is reachable — registers
-the run in `model_registry`, promoting it only if it beats the current incumbent. This
-takes a few minutes, mostly for the BTS download on a cold cache.
+Every script downloads its real training data on first run, cached afterward:
+`train_eta`/`train_delay_gnn` pull BTS monthly flight data (a few hundred MB) to
+`data/raw/bts/`; `train_trajectory`/`train_autoencoder` pull a CONUS-filtered hour of ADS-B
+Exchange historical samples (~2.9M rows across 721 snapshot files, cached individually to
+`data/raw/adsbx_hist/`) — see [ADR 0004](../docs/adr/0004-historical-trajectory-data-source.md)
+for why those two train on a different data source than M2/M3. Each writes a versioned
+artifact to `data/models/`, regenerates its section of `docs/ml-report.md`, and — if
+Postgres is reachable — registers the run in `model_registry`, promoting it only if it
+beats the current incumbent on that kind's primary metric. `train_trajectory` is the slow
+one: building ~627K training windows from the downloaded hour takes several minutes by
+itself, on top of GRU training. Run a single model's training on its own with
+`python -m ml.train.train_eta` (etc.) instead of the full `make train` if you only need one.
 
 After training, `GET http://localhost:8000/api/v1/models/scorecard` and the `/scorecard`
 frontend page will show real metrics instead of the "no model has been promoted yet" empty

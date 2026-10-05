@@ -250,9 +250,153 @@ services/assembler/main.py :: run()'s main loop
 
 This is deliberately a *secondary* sink — Postgres/TimescaleDB is the operational store
 (with retention policies that eventually drop old raw rows), while Parquet-on-MinIO is the
-cheap, long-term, full-resolution archive that future ML training jobs (M1's trajectory
-model, M3's delay-propagation GNN) will read from, via `pyarrow`/`pandas`/`polars`, none of
-which require any conversion step since Parquet is their native format.
+cheap, long-term, full-resolution archive future ML training jobs will read from, via
+`pyarrow`/`pandas`/`polars`, none of which require any conversion step since Parquet is
+their native format. M1 and M4 don't read from it yet — this project's own ingest/assembler
+pipeline hasn't been running long enough to accumulate the volume a sequence model needs,
+so they train on a historical ADS-B Exchange sample instead (see Flow 7 and
+[ADR 0004](adr/0004-historical-trajectory-data-source.md)). Once enough real history has
+accumulated here, retraining against it instead is the natural next step.
+
+---
+
+## Flow 7 — Training and serving the trajectory model (M1)
+
+```
+make train  (ml/train/train_trajectory.py)
+  ↓
+ml/data/loaders/adsbx_hist.py :: load_default_training_window()
+  → downloads (once; cached to data/raw/adsbx_hist/) a CONUS-filtered hour of ADS-B
+     Exchange's free historical readsb-hist samples — real position data, not this
+     project's own live history (see ADR 0004 for why)
+  ↓
+ml/datasets/trajectory.py :: build_arrays()
+  → splits each aircraft's track into continuous (gap-free) segments
+  → for each, slides a 12-point window and computes features via the SAME
+     services/common/features/trajectory.py :: compute_trajectory_features() a live
+     caller uses — one feature implementation, not two
+  → finds each window's real future position at every horizon (60s-900s), masking out
+     horizons with no real observation in range rather than fabricating one
+  ↓  627,495 real windows
+ml/data/split.py :: chronological_split()  (by window anchor time, never random)
+  ↓
+ml/models/trajectory_gru.py :: TrajectoryGRU  (2-layer GRU + quantile heads)
+  → trained with masked pinball loss against {0.1, 0.5, 0.9} quantiles
+  ↓
+ml/eval/trajectory_baselines.py :: constant_velocity_predict()  (the required baseline)
+ml/eval/trajectory_metrics.py  (median/P90 error per horizon, 80% interval coverage,
+                                  a 3-quantile CRPS approximation)
+  ↓
+ONNX export (torch.onnx.export) → data/models/traj-gru-{timestamp}.onnx
+  ↓
+ml/eval/report.py + ml/export/register.py  (same pattern as every other model)
+
+                                              ↓ (independently, later)
+
+GET /api/v1/aircraft/{icao24}/prediction
+  ↓
+services/inference/trajectory.py :: predict_trajectory()
+  → loads the promoted model via onnxruntime (not torch - see Architecture)
+  → queries the LIVE state_vectors table for this aircraft's most recent WINDOW_SIZE
+     reports, computes features via the SAME compute_trajectory_features(), runs
+     inference
+  ↓  per-horizon {q10, q50, q90} position offsets — real uncertainty cones
+```
+
+## Flow 8 — Training and serving the delay-propagation model (M3)
+
+```
+make train  (ml/train/train_delay_gnn.py)
+  ↓
+ml/data/loaders/bts.py :: load_month(2024, 1)  (same BTS month M2 trains on)
+  ↓
+ml/datasets/network.py :: build_graph()
+  → ~334 airport nodes; flow edges (scheduled route volume) and rotation edges (the
+     same tail number's consecutive legs - this project's historical stand-in for the
+     live flights.prev_leg_flight_id field, which isn't populated by the live pipeline)
+  ↓
+ml/datasets/network.py :: build_arrays()
+  → bins every flight into 15-min departure/arrival buckets per airport
+  → applies services/common/features/network.py :: compute_network_features() - the
+     SAME function a live caller uses
+  ↓  (2976 time buckets) x (334 airports) dense feature grid
+Chronological split by time-bucket index
+  ↓
+ml/eval/network_baselines.py
+  → historical-mean-by-(airport,hour,dow), and LightGBM-plus-neighbor-delay
+     (required baselines - see master spec §7)
+  ↓
+ml/models/delay_gnn.py :: DelayGNN  (diffusion graph conv + temporal GRU)
+  → trained with masked MAE against real future arrival delay
+  ↓
+ml/eval/report.py + ml/export/register.py
+
+                                              ↓ (independently, later)
+
+GET /api/v1/airports/{icao}/delay-forecast
+  ↓
+services/inference/network.py :: forecast_delay()
+  → loads the promoted model + its trained graph (airports, flow_adj, rotation_adj)
+  → queries the LIVE flights table for the most recent SEQUENCE_LENGTH buckets'
+     ops-count/cancellation signal per airport (delay signal is real zero here - the
+     live pipeline doesn't populate scheduled-time delay fields yet, see the module's
+     own docstring)
+  ↓  per-horizon-hour predicted arrival delay for the requested airport
+```
+
+## Flow 9 — Training the learned anomaly layer (M4)
+
+```
+make train  (ml/train/train_autoencoder.py)
+  ↓
+ml/data/loaders/adsbx_hist.py :: load_default_training_window()  (same historical
+                                                                     sample as M1)
+  ↓
+ml/datasets/anomaly.py :: build_windows()
+  → each continuous segment of >=128 native points resampled (linear interpolation)
+     to exactly 128 points - a real downsampling, not a padded-up short fragment
+  ↓  5134 real segments
+ml/models/traj_autoencoder.py :: TrajectoryAutoencoder  (1D conv encoder/decoder)
+  → trained to reconstruct normalized segments; MSE loss
+  ↓
+sklearn.ensemble.IsolationForest  fit on the trained embeddings
+  ↓
+Evaluation: replay each test segment through services/inference/anomaly_rules.py ::
+            check_all_rules() (the SAME rules engine wired into the live pipeline) to
+            get a rule-flagged/not label, then check whether the IsolationForest's
+            anomaly score agrees (PR-AUC, precision@k) - an honest proxy for "does the
+            learned layer agree with rules", not the master spec's BTS-incident-labeled
+            precision (see ADR 0004 for why)
+  ↓
+Embeddings saved as a .npz artifact (not written to trajectory_embeddings - that
+  table's flight_id has a real FK to flights, which this historical data has no row in)
+  ↓
+ml/eval/report.py + ml/export/register.py
+```
+
+## Flow 10 — Conflict probability (M5)
+
+```
+GET /api/v1/conflicts?bbox=&min_prob=
+  ↓
+services/api/routers/conflicts.py :: list_conflicts()
+  → queries state_vectors for every aircraft currently in the bbox
+  ↓
+services/inference/conflict.py :: prune_candidate_pairs()
+  → H3 k-ring + altitude-band filter - cheap, before any model inference, rules out
+     aircraft that are nowhere near each other
+  ↓  a short list of candidate (i, j) pairs
+For each aircraft appearing in >=1 candidate pair:
+  services/inference/trajectory.py :: predict_trajectory()  (Flow 7's live M1 serving)
+  ↓  per-aircraft quantile predictions, or skipped if unavailable (not fabricated)
+services/inference/conflict.py :: monte_carlo_conflict_probability()
+  → samples 200 trajectory pairs per candidate from each aircraft's {q10,q50,q90}
+     (treated as a triangular distribution per axis), via a SEEDED Rng derived
+     deterministically per pair (Rng.spawn(f"{i}:{j}")) - never Python's global random
+  → checks closest-point-of-approach at every shared predicted horizon
+  ↓
+  { icao24_a, icao24_b, probability } for every pair at or above min_prob
+```
 
 ---
 

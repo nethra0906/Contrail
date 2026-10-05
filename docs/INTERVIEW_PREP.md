@@ -9,11 +9,12 @@ answer than a vague claim that collapses under one follow-up.
 
 "Contrail is a real-time digital twin of U.S. airspace — it ingests live ADS-B aircraft
 data, streams it through a Kafka-based pipeline, and serves it to a live map over a
-hand-rolled binary WebSocket protocol for performance. I've also trained and deployed a
-LightGBM model that predicts flight arrival delay, with a live scorecard comparing it
-against baselines. The long-term goal — not yet built — is a counterfactual simulator: fork
-reality at a timestamp, inject a disruption, and see how delay propagates through the
-network."
+hand-rolled binary WebSocket protocol for performance. On top of that I've trained and
+live-deployed four ML models: a GRU that forecasts an aircraft's position with calibrated
+uncertainty, a graph neural network that predicts delay propagation across the airport
+network, an autoencoder-based anomaly detector, and a Monte Carlo conflict-probability
+estimator. The long-term goal — not yet built — is a counterfactual simulator: fork reality
+at a timestamp, inject a disruption, and see how delay propagates through the network."
 
 ## 1-minute explanation
 
@@ -60,10 +61,21 @@ honestly — predicting zero delay, and just propagating the scheduled delay for
 there's a promotion gate that only lets a newly trained model go live if it strictly beats
 whatever's currently serving.
 
-"What's not built yet, and I'm specific about this rather than vague: the trajectory model,
-the delay-propagation graph model, and — the actual flagship feature — the counterfactual
-simulator itself. I have the low-level primitives (a deterministic event clock, a runway
-queueing model, scenario validation) but not the engine that ties them together."
+"On top of that I built the other four models the spec calls Network Intelligence: a GRU
+with quantile heads for trajectory forecasting, trained on real historical ADS-B position
+data and exported to ONNX so live serving doesn't need to import PyTorch at all; a diffusion
+graph convolution plus temporal GRU for delay propagation, which is the model that actually
+powers the flagship feature — it beats both required baselines, including a LightGBM model
+that gets one hop of neighbor-airport delay as a feature, so the multi-hop graph propagation
+is demonstrably adding value, not just 'using a bigger model'; a convolutional autoencoder
+for anomaly detection; and a Monte Carlo conflict-probability estimator that samples from
+the trajectory model's uncertainty.
+
+"What's not built yet, and I'm specific about this rather than vague: the actual flagship
+feature, the counterfactual simulator itself. I have the low-level primitives (a
+deterministic event clock, a runway queueing model, scenario validation) and now the
+delay-propagation model the simulator's design calls for it to couple to — but not the
+engine that ties them together yet."
 
 ## Architecture — how to draw it on a whiteboard
 
@@ -118,6 +130,43 @@ time with far less hyperparameter sensitivity. A neural net is the right tool fo
 (trajectory forecasting), which genuinely is a sequence-modeling problem — I made that
 distinction deliberately, not by default.
 
+**"Why build the graph neural network from scratch instead of using PyTorch Geometric?"**
+At this graph's size — about 334 airport nodes, two dense adjacency matrices — the actual
+diffusion-convolution operation is a handful of matrix multiplications. Writing it directly
+(`torch.einsum` over the adjacency and node features) kept the whole mechanism in about 100
+lines I can walk through and explain exactly, instead of learning and depending on a
+general-purpose library's API for something this small. If the graph were much larger or I
+needed more exotic layer types, that tradeoff would flip.
+
+**"Why did you train the trajectory and anomaly models on a different data source than
+everything else?"** Because the honest answer was more valuable than papering over it: M1
+and M4 need real continuous aircraft *position* history, which BTS (scheduled-flight
+records) doesn't have at all, and this project's own live ingest hadn't been running long
+enough to accumulate the volume a sequence model needs. Rather than train on too little
+data or fake it, I used ADS-B Exchange's free historical sample data and wrote an ADR
+explaining exactly why, what window I used, and what the honest limitation is.
+
+**"Your anomaly detection result doesn't look very good — PR-AUC near chance. Why include
+it?"** Because it's true, and I'd rather show a real negative result than a flattering fake
+one. The test set only had 6 positive examples out of 1027 segments — nowhere near enough
+to draw a real conclusion about whether the learned layer works, in either direction. I
+documented that explicitly rather than cherry-picking a different cut of the data to make
+the number look better, and the right fix (a larger, more varied evaluation sample) is in
+my own prioritized future-work list, not hidden.
+
+**"Your trajectory model loses to its own baseline. Doesn't that mean the GRU was a bad
+idea?"** It means the baseline was underrated, not that the model was a bad idea. The spec
+requires constant-velocity dead reckoning as the bar the GRU has to clear before it's worth
+the extra complexity — I actually caught a real bug in my own baseline's velocity math first
+(it was dividing a whole window's cumulative displacement by one 5-second step, overstating
+speed ~11x, which is why the baseline originally *looked* easy to beat), fixed it, and the
+corrected baseline turned out to be genuinely hard to beat at 60-300s: real aircraft in
+cruise really are close to constant-velocity over that short a horizon. The GRU had one
+hour of training data and ten epochs to learn to beat physics in a regime where physics
+already wins, and it didn't get there. I reported that as the real result instead of
+tuning until the comparison looked better, which is exactly the same standard I held the
+anomaly result to.
+
 ## Difficult technical questions — honest answers specific to this project
 
 **"How does authentication work?"** It doesn't, yet — every endpoint is read-only and
@@ -171,8 +220,11 @@ the code at a glance. More generally: I'd put integration tests in CI from the f
 existed because nobody had run that suite together before, since CI never does.
 
 **"What are the limitations?"** See [Learning guide §17](LEARNING_GUIDE.md#17-limitations-honestly)
-for the full, honest list — the short version: one of six planned ML models is actually
-trained and live, no model is served for real-time inference (only reported via the
-scorecard), the counterfactual simulator (the stated flagship feature) doesn't exist beyond
-two low-level primitives, and there's no authentication (currently fine, given there's
-nothing to write).
+for the full, honest list — the short version: five of six planned ML models are trained,
+honestly evaluated, and live-served (M1-M5); the counterfactual simulator (the stated
+flagship feature) still doesn't exist beyond two low-level primitives and M3's now-working
+delay-propagation model, which the simulator's design calls for but hasn't yet been coupled
+to a discrete-event engine; M3 has no live weather signal (no weather-ingestion pipeline
+exists); M1 and M4 train on a historical data sample rather than this project's own
+live-accumulated history; and there's no authentication (currently fine, given there's
+still nothing to write).

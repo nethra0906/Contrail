@@ -11,12 +11,14 @@ forward, and diff the counterfactual world against what actually happened.
 
 > **Status: early build.** Stage 1 (foundation), Stage 2 (live map MVP), Stage
 > 3 (streaming backbone, end to end including the frontend's switch to the
-> binary `/ws/live` feed), and Stage 4's M2 ETA-regression model (trained on
-> real BTS data, served via `/api/v1/models/scorecard`) are implemented and
-> tested. See [Build status](#build-status) below for exactly what's real
-> today versus what's specified but not yet built. This
-> section will be replaced with real screenshots and a demo link once
-> further stages land - see `docs/CONTRAIL_MASTER_SPEC.md` for the full plan.
+> binary `/ws/live` feed), Stage 4 (M2 ETA regression, trained on real BTS
+> data), and Stage 5 (Network Intelligence - M1 trajectory forecasting, M3
+> delay-propagation GNN, M4's learned anomaly layer, M5 conflict probability,
+> all trained on real data with real baselines) are implemented and tested.
+> See [Build status](#build-status) below for exactly what's real today
+> versus what's specified but not yet built. This section will be replaced
+> with real screenshots and a demo link once further stages land - see
+> `docs/CONTRAIL_MASTER_SPEC.md` for the full plan.
 
 ## Why this exists
 
@@ -146,11 +148,61 @@ what was *rejected* (Kubernetes, Neo4j, MongoDB, Airflow) and why.
   seeds produce different jitter, and landing order is deterministic and
   matches arrival order.
 
+- **Stage 5 (Network Intelligence)**, all four remaining models trained end
+  to end on real data with real, honestly-reported baselines - see
+  [ADR 0004](docs/adr/0004-historical-trajectory-data-source.md) for the one
+  real data-source deviation this stage required (M1/M4 train on free
+  historical ADS-B Exchange samples, not this project's own short-lived live
+  history; M3 trains on one BTS month, the same precedent M2 set):
+  - **M1 - trajectory forecasting**: a 2-layer GRU with quantile
+    ({0.1, 0.5, 0.9}) heads over 627K real windows from a real historical
+    hour of CONUS traffic. ONNX-exported and live-served via
+    `GET /api/v1/aircraft/{icao24}/prediction`
+    (`services/inference/trajectory.py`) - real uncertainty cones from
+    `state_vectors` history, not a stub. Honest, unflattering result
+    reported as-is (not improved-looking): the constant-velocity
+    dead-reckoning baseline the spec requires as the bar to clear
+    (0.38/1.57/3.24 km median error at 60s/180s/300s) **beats** the GRU
+    (9.67/29.27/49.22 km) at every horizon with test coverage, and the
+    GRU's nominal 80% intervals only achieve 59-64% actual coverage
+    (overconfident) - real aircraft in level cruise are close enough to
+    constant-velocity over these short horizons that dead reckoning is a
+    genuinely hard bar, and one hour of training data wasn't enough for
+    the GRU to clear it. The 1-hour window also produces zero valid test
+    windows at 600s/900s (no aircraft tracked that long inside the
+    window), so those two horizons have no reported result. See
+    [ADR 0004](docs/adr/0004-historical-trajectory-data-source.md) for
+    the full writeup.
+  - **M3 - delay-propagation GNN** *(powers the flagship)*: a diffusion
+    graph convolution + temporal GRU over a real 334-airport graph (flow +
+    rotation edges built from BTS tail-number sequencing), beating both
+    required baselines - historical-mean-by-(airport,hour,dow) (15.5-19.4
+    min MAE) and LightGBM-plus-neighbor-delay (6.38-6.53 min MAE) - with an
+    overall MAE of **6.26 minutes**. Live-served via
+    `GET /api/v1/airports/{icao}/delay-forecast`
+    (`services/inference/network.py`) and a new airport detail page
+    (`/airports/{icao}`).
+  - **M4 - learned anomaly layer**: a 1D conv autoencoder (128-point
+    resampled tracks → 64-d embedding) + IsolationForest, evaluated against
+    the already-wired rules layer's output rather than the spec's
+    BTS-incident labels (documented deviation, ADR 0004) - an honest,
+    unflattering real result (PR-AUC 0.0052 on 6 positives out of 1027 test
+    segments) reported as-is, not improved-looking. The rules layer itself
+    is now live, publishing to a new `anomalies.detected` Kafka topic and
+    readable via `GET /api/v1/anomalies`, shown on the live map as a
+    real-time anomaly feed panel.
+  - **M5 - conflict probability**: H3 k-ring + altitude-band candidate
+    pruning, then deterministic (seeded) Monte Carlo sampling from M1's
+    quantile predictions for closest-point-of-approach conflict estimation.
+    Served via `GET /api/v1/conflicts?bbox=&min_prob=`
+    (`services/api/routers/conflicts.py`), 13 passing unit tests covering
+    pruning correctness and determinism.
+  - Full real numbers for every model: [`docs/ml-report.md`](docs/ml-report.md),
+    regenerated from `ml/eval/` training-run metrics, never hand-entered.
+
 **Specified, not yet built** (see `docs/CONTRAIL_MASTER_SPEC.md` §9 for the
-full 10-stage plan): the remaining ML models - trajectory forecasting (M1)
-and the delay-propagation GNN (M3), plus anomaly detection (Stage 4-5), the
-timeline/time-machine (Stage 6), and the counterfactual simulation sandbox -
-the flagship feature (Stage 7).
+full 10-stage plan): the timeline/time-machine (Stage 6), and the
+counterfactual simulation sandbox - the flagship feature (Stage 7).
 
 **Known deviations from the original spec**, discovered by actually running
 the code against real services rather than assumed: `airplanes.live` is not

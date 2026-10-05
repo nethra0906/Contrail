@@ -147,16 +147,27 @@ Python values):
   `close_leg_if_landing` — the per-message orchestration, still with no I/O (nearest-airport
   resolution, a DB lookup, is explicitly the caller's job).
 
-**The anomaly-detection layer — wired in this session:**
+**The anomaly-detection layer:**
 
 - **`services/inference/anomaly_rules.py`** — M4's rules-based layer (emergency squawk codes,
-  rapid uncontrolled-looking descent, go-arounds). Fully implemented and unit-tested
-  (`tests/unit/test_anomaly_rules.py`) since before this session, but never actually called
-  from the running pipeline — genuinely dead code in production terms, despite its own
-  docstring claiming it was "live from Stage 3 onward." This session wired it into
-  `handle_message()` (right after track-state advancement, before the enriched-record
-  publish) and added `services/assembler/sinks/anomalies.py` to persist detected events to
-  the `anomalies` table, plus an `ANOMALIES_DETECTED_TOTAL` Prometheus counter.
+  rapid uncontrolled-looking descent, go-arounds). Wired into `handle_message()` (right
+  after track-state advancement, before the enriched-record publish), persisting detected
+  events to the `anomalies` table via `services/assembler/sinks/anomalies.py`, incrementing
+  an `ANOMALIES_DETECTED_TOTAL` Prometheus counter, and publishing to the
+  `anomalies.detected` Kafka topic (`services/common/bus.py`'s topic registry) so a
+  consumer doesn't have to filter the full `adsb.enriched` stream to find them — the
+  `GET /api/v1/anomalies` endpoint reads the persisted table, not the topic directly.
+  `ml/train/train_autoencoder.py` (M4's learned layer) also replays this exact function
+  during evaluation, so "does the live system flag this" and "does the offline evaluation
+  flag this" are answered identically.
+
+**`services/inference/`'s three other modules are live-serving, not detection logic** —
+each loads a promoted model from `model_registry` (cached by `model_version`, cleared on
+a promotion change) and answers one API endpoint's question from real current data:
+`trajectory.py` (M1's ONNX session, `/prediction`), `network.py` (M3's PyTorch checkpoint
+plus its trained graph, `/delay-forecast`), and `conflict.py` (M5's pure pruning + Monte
+Carlo sampling, consumed by `/conflicts` — this one has no model of its own to load, it
+consumes M1's live output).
 
 The I/O layer (`sinks/`), one file per external system touched:
 
@@ -189,19 +200,28 @@ API replicas starting simultaneously can never race each other to apply a migrat
   `GET /api/v1/aircraft/{icao24}` (single aircraft's latest state), and
   `GET /api/v1/aircraft/{icao24}/track` (historical position history, time-ranged).
 - **`routers/airports.py`** — `GET /api/v1/airports` and `GET /api/v1/airports/{icao}`,
-  serving the seeded reference data.
+  serving the seeded reference data, plus `GET /api/v1/airports/{icao}/delay-forecast`
+  (M3's live serving, via `services/inference/network.py`).
+- **`routers/anomalies.py`** — `GET /api/v1/anomalies`: a thin read over the `anomalies`
+  table the now-wired rules layer actually writes to, not a second detection path.
+- **`routers/conflicts.py`** — `GET /api/v1/conflicts`: M5's candidate conflict pairs,
+  pruned by `services/inference/conflict.py` and scored via Monte Carlo sampling from
+  live M1 predictions for every aircraft in the requested bbox.
 - **`routers/models.py`** — `GET /api/v1/models/scorecard`: the currently-*promoted* model
   per kind (not every training run ever made — see its own docstring on why a kind with no
   promoted model is simply absent, not backfilled with a stale/synthetic entry).
-- **`ws/live.py`** — the `/ws/live` WebSocket endpoint. `build_full_frame()` (now covered by
-  `tests/integration/test_ws_live_build_full_frame.py`, added this session — it had none
-  before) queries the latest state per aircraft within the client's subscribed H3 cells,
-  encodes it as a binary frame, then the connection forwards whatever Redis publishes to
-  those cells' channels as binary deltas, until the client disconnects (viewport changes
-  mean reconnecting with a new subscribe message, not resubscribing mid-stream — see the
+- **`ws/live.py`** — the `/ws/live` WebSocket endpoint. `build_full_frame()` queries the
+  latest state per aircraft within the client's subscribed H3 cells, encodes it as a
+  binary frame, then the connection forwards whatever Redis publishes to those cells'
+  channels as binary deltas, until the client disconnects (viewport changes mean
+  reconnecting with a new subscribe message, not resubscribing mid-stream — see the
   module docstring for the concurrency reason).
 
-**What's conspicuously not here:** no `anomalies.py`, `snapshots.py`, `scenarios.py`, or
+Also note `aircraft.py` has one more route beyond the three above:
+`GET /api/v1/aircraft/{icao24}/prediction` (M1's live serving, via
+`services/inference/trajectory.py`).
+
+**What's conspicuously still not here:** no `snapshots.py` or `scenarios.py`/
 `simulations.py` router — the counterfactual sandbox and time-machine features (Stages
 6-7 of the master spec) have no API surface yet, matching that none of their backend logic
 is built either (see [Limitations](LEARNING_GUIDE.md#17-limitations-honestly)).
@@ -213,46 +233,99 @@ is built either (see [Limitations](LEARNING_GUIDE.md#17-limitations-honestly)).
 Not a running service — these are scripts, run on demand (`make train`).
 
 - **`data/loaders/bts.py`** — downloads and parses the US DOT's BTS "On-Time Performance"
-  monthly data (real government flight-delay data, no API key needed).
+  monthly data (real government flight-delay data, no API key needed). Feeds M2 and M3.
+- **`data/loaders/adsbx_hist.py`** — downloads ADS-B Exchange's free historical
+  `readsb-hist` samples (global airborne-traffic snapshots, cached to disk per-snapshot).
+  Feeds M1 and M4, which need real continuous position history BTS doesn't have and this
+  project's own live ingest hasn't accumulated enough of yet — see
+  [ADR 0004](adr/0004-historical-trajectory-data-source.md).
 - **`data/split.py`** — `chronological_split`: splits by *time*, never randomly. This is a
   project-wide rule (the master spec's "execution rule 4" — chronological-only ML
   validation) enforced by a dedicated guard test
   (`tests/unit/test_chronological_split.py`), because a model that's trained on data from
   *after* the moment it's meant to predict is cheating in a way that looks like good
-  accuracy until it meets real traffic.
+  accuracy until it meets real traffic. M3's dataset builder splits by time-bucket index
+  directly (a dense, evenly-spaced axis) rather than routing through this DataFrame-based
+  helper, but follows the identical never-random rule.
 - **`datasets/eta.py`** — turns a raw BTS row into the feature table M2 actually trains on,
   using the *same* `compute_eta_features` function `services/common/features/eta.py`
-  exports for (eventual) live serving — `tests/unit/test_eta_train_serve_parity.py` is the
-  test that guards this never silently diverges.
-- **`eval/baselines.py`** — two honest baselines M2 is compared against: predict-zero-delay,
-  and propagate-the-scheduled/departure-delay-forward. A model report without baselines is
-  a number with no meaning; this project always computes and reports both.
-- **`eval/metrics.py`** — MAE/P90, overall and broken down by scheduled-duration bucket.
-  The single source of truth for every metric number that ends up in a report — never
-  computed ad hoc elsewhere.
-- **`eval/report.py`** — regenerates `docs/ml-report.md`'s machine-generated section from a
-  metrics JSON. "No metric in that report is ever typed by hand" (the master spec's
-  "execution rule 3") is enforced structurally: the report file has a marked block
-  (`<!-- ml-report:eta:start/end -->`) that this script replaces, and nothing else touches.
+  exports for live serving — `tests/unit/test_eta_train_serve_parity.py` is the test that
+  guards this never silently diverges.
+- **`datasets/trajectory.py`** — turns loaded ADS-B Exchange position data into M1's
+  12-point training windows: splits each aircraft's stream into continuous (gap-free)
+  segments, slides a window across each, and applies `compute_trajectory_features` (the
+  same function live serving uses). Finding each window's real future position at every
+  horizon uses a precomputed-array-plus-`searchsorted` lookup, not a naive per-horizon
+  linear scan — an earlier version of this file measured that scan as the dominant cost
+  building 627K windows and was rewritten for it.
+- **`datasets/network.py`** — builds M3's airport graph (`build_graph`: flow edges from
+  scheduled route volume, rotation edges from the same tail number's consecutive BTS
+  legs) and its dense per-bucket node feature grid (`build_arrays`), applying
+  `compute_network_features` (`services/common/features/network.py`) per bucket.
+- **`datasets/anomaly.py`** — resamples each continuous ADS-B Exchange segment to exactly
+  128 points (linear interpolation, only for segments with enough native points to be a
+  real downsampling) — the input M4's autoencoder reconstructs.
+- **`eval/baselines.py`** — M2's two honest baselines: predict-zero-delay, and
+  propagate-the-scheduled/departure-delay-forward.
+- **`eval/metrics.py`** — M2's MAE/P90, overall and broken down by scheduled-duration
+  bucket. The single source of truth for every M2 metric number — never computed ad hoc
+  elsewhere.
+- **`eval/trajectory_baselines.py`** — M1's required baseline: constant-velocity dead
+  reckoning, projecting the last observed velocity vector linearly forward.
+- **`eval/trajectory_metrics.py`** — M1's metrics: median/P90 horizontal error per
+  horizon, 80% interval coverage, and a 3-quantile approximation of CRPS and of a PIT
+  calibration histogram — honestly labeled as approximations of what a full predictive
+  distribution would give, not the exact scores.
+- **`eval/network_baselines.py`** — M3's two required baselines: historical mean by
+  (airport, hour, day-of-week), and LightGBM on each node's own features plus its
+  flow-graph-neighbors' current delay — what the GNN's extra propagation machinery has to
+  beat to be worth it.
+- **`eval/report.py`** — regenerates `docs/ml-report.md`'s machine-generated sections from
+  a metrics JSON, one renderer function per model kind (`render_eta_section`,
+  `render_trajectory_section`, `render_network_section`, `render_anomaly_section`). "No
+  metric in that report is ever typed by hand" (execution rule 3) is enforced
+  structurally: each kind's report has its own marked block
+  (`<!-- ml-report:{kind}:start/end -->`) that only that kind's renderer touches.
 - **`export/register.py`** — `register_and_maybe_promote`: inserts a new training run into
-  `model_registry`, promotes it over the incumbent *only if it beats it* on MAE (demoting
-  the old one), and never raises past `train()` on a DB failure (so `make train` still
-  succeeds standalone, without Docker running — the result just isn't persisted to the
-  registry). Had zero test coverage before this session despite being the module
-  responsible for "a bad model must never silently start being served" —
-  `tests/integration/test_model_registry_promotion.py` now covers first-promotion, a better
-  challenger, a worse challenger, per-kind scoping, a tied MAE, and the DB-unreachable
-  fallback.
+  `model_registry`, promotes it over the incumbent *only if it beats it* on that kind's
+  primary metric (demoting the old one), and never raises past `train()` on a DB failure.
+  Generalized to support four different report shapes via `_PRIMARY_METRIC_PATHS` (a path
+  per kind — M2 compares LightGBM MAE, M1 compares median km error, M3 compares GNN MAE,
+  M4 compares reconstruction MAE, deliberately not the noisy rule-agreement PR-AUC on a
+  tiny positive sample). `tests/integration/test_model_registry_promotion.py` covers
+  first-promotion, a better/worse/tied challenger, per-kind scoping, and the
+  DB-unreachable fallback.
 - **`train/train_eta.py`** — M2, real and complete: load BTS data → chronological split →
   shared feature computation → LightGBM → evaluate against baselines → write a versioned
   model artifact to `data/models/` → regenerate the report → register/maybe-promote.
-- **`train/train_trajectory.py`** — M1: genuinely a stub (a literal `TODO(Stage 4)`), checks
-  whether enough position history exists and logs
-  `m1_training_not_yet_implemented`, then returns. Honest, labeled, not hidden.
-- **`models/`** — empty except `__init__.py`. The spec's intended location for standalone
-  model-definition code (e.g. a `trajectory_gru.py`); M2's LightGBM model is currently
-  constructed inline in `train_eta.py` rather than factored out here, since there's only
-  one model built so far.
+- **`train/train_trajectory.py`** — M1, real and complete: load ADS-B Exchange history →
+  build windows → chronological split → train a 2-layer GRU with masked pinball loss
+  against {0.1, 0.5, 0.9} quantiles → evaluate against the constant-velocity baseline →
+  ONNX-export → report/register. `EPOCHS`/`BATCH_SIZE` are tuned for CPU training at this
+  volume (627K windows) with a documented rationale, not arbitrary numbers.
+- **`train/train_delay_gnn.py`** — M3, real and complete: load one BTS month → build the
+  graph and bucket grid → fit both baselines → train the diffusion-GCN + temporal GRU with
+  masked MAE → evaluate per-horizon → report/register. Real result: the GNN beats both
+  baselines, including the LightGBM-plus-neighbor-delay one — see `docs/ml-report.md`.
+- **`train/train_autoencoder.py`** — M4, real and complete: load ADS-B Exchange history →
+  resample to 128-point windows → train the conv autoencoder → fit an `IsolationForest` on
+  the embeddings → evaluate score-vs-rules-layer agreement (replaying each test segment
+  through the exact same `anomaly_rules.check_all_rules` wired into the live pipeline) →
+  report/register. The real result is honestly weak (near-chance PR-AUC on only 6 positive
+  test examples) and reported as such — see
+  [ADR 0004](adr/0004-historical-trajectory-data-source.md) for why the evaluation
+  methodology itself had to deviate from the spec, not just the data source.
+- **`models/trajectory_gru.py`** — M1's `TrajectoryGRU` (2-layer GRU + quantile heads) and
+  its masked pinball loss function, factored out of the train script (unlike M2's inline
+  LightGBM construction) so any future PyTorch-side tooling shares one definition with
+  training. Live serving itself (`services/inference/trajectory.py`) runs the exported
+  ONNX graph via `onnxruntime`, not this class directly — see the Architecture doc for why.
+- **`models/delay_gnn.py`** — M3's `DiffusionGraphConv` (one graph-propagation layer,
+  hand-written as a few `torch.einsum` calls rather than a graph-learning library) and
+  `DelayGNN` (stacks per-timestep graph convolution with a shared-weight temporal GRU).
+  `services/inference/network.py` loads this exact class to run live inference.
+- **`models/traj_autoencoder.py`** — M4's `TrajectoryAutoencoder`: 1D-convolutional
+  encoder/decoder around a 64-dimensional embedding bottleneck.
 
 ---
 
@@ -275,20 +348,29 @@ React Query provider, the splash-screen gate) **and `app/page.tsx`** (`/`, the l
   subscribed viewport bbox in sync via `map.on("moveend", ...)`.
 - **`components/map/AircraftPanel.tsx`** — the selected-aircraft detail panel, fetching
   `GET /api/v1/aircraft/{icao24}/track` for its recent history.
+- **`components/map/AnomalyFeed.tsx`** — a collapsible panel on the live map polling
+  `GET /api/v1/anomalies` every 15s (deliberately a poll, not a second WebSocket, for an
+  event that fires a handful of times an hour) and listing recent rule-flagged anomalies.
+- **`app/airports/page.tsx`** — a searchable list of every seeded airport, linking to each
+  one's detail page.
+- **`app/airports/[icao]/page.tsx`** — one airport's detail: static info (name, runways)
+  plus a live call to `GET /api/v1/airports/{icao}/delay-forecast`, with a real empty
+  state when no "network" model has been promoted yet or this airport wasn't in the
+  training graph.
 - **`lib/ws-client.ts`** — `useLiveAircraftFeed(bbox)`: converts the viewport to H3 cells
-  (`bboxToH3Cells`, now memoized and hardened against degenerate zero-area bboxes — both
-  fixed this session), opens the WebSocket, decodes frames, maintains the running
-  `icao24 -> AircraftState` map, and reconnects with exponential backoff on drop.
-  WebSocket/decode failures now log (`console.error` for a corrupt frame — a real protocol
-  bug; `console.warn` for a routine connection drop that self-heals via reconnect) instead
-  of failing silently, as they did before this session.
+  (`bboxToH3Cells`, memoized and hardened against degenerate zero-area bboxes), opens the
+  WebSocket, decodes frames, maintains the running `icao24 -> AircraftState` map, and
+  reconnects with exponential backoff on drop. WebSocket/decode failures log
+  (`console.error` for a corrupt frame — a real protocol bug; `console.warn` for a
+  routine connection drop that self-heals via reconnect) instead of failing silently.
 - **`lib/ws-protocol.ts`** — the binary frame decoder, the frontend mirror of
-  `services/common/ws_protocol.py`. Now covered by round-trip tests
-  (`ws-protocol.test.ts`) — this project's first frontend tests, added this session via a
-  new Vitest setup, since none existed before.
-- **`lib/api-client.ts`** — the typed REST client. `listAircraft`/`listAirports` and the
-  `Airport` interface were removed this session — leftovers from the pre-WS REST-polling
-  live map, with zero remaining callers.
+  `services/common/ws_protocol.py`. Covered by round-trip tests (`ws-protocol.test.ts`).
+- **`lib/api-client.ts`** — the typed REST client, one typed function per backend
+  endpoint — `listAirports`/`getAirport`/`getDelayForecast`/`getAnomalies` were added
+  alongside the Stage 5 endpoints they call. The scorecard types
+  (`ScorecardEntry.metrics`) are deliberately a loose `Record<string, unknown>` rather
+  than one fixed shape, since each model kind's report genuinely looks different —
+  `ScorecardView.tsx` narrows per kind at render time instead of forcing one schema.
 - **`lib/store.ts`** — the Zustand store (viewport bbox, selected aircraft).
 - **`components/ui/Nav.tsx`** — the top nav. "Timeline" and "Sandbox" are shown as real,
   explicitly-labeled "coming soon" items, not broken or hidden links — honest UI for
@@ -302,18 +384,15 @@ React Query provider, the splash-screen gate) **and `app/page.tsx`** (`/`, the l
 ## `tests/`
 
 - **`tests/unit/`** — pure-logic tests, no external services, run via `make test-unit`
-  (`pytest tests/unit`). 163 tests as of this session's README refresh, plus the 15 added
-  during this session's hardening pass (ratelimit, determinism, plus the existing suite).
+  (`pytest tests/unit`). 195 tests, including `test_conflict.py` (M5's candidate pruning
+  and Monte Carlo determinism — 13 tests), `test_ratelimit.py`, and `test_determinism.py`.
 - **`tests/integration/`** — tests against a real, ephemeral TimescaleDB container
-  (`testcontainers`), skipped automatically (not failed) when Docker isn't reachable. This
-  session found and fixed a real isolation bug here: the container is shared across every
-  test in the session for speed, but there was no per-test rollback, so data written by one
-  test leaked into the next — concretely, a pre-existing test
-  (`test_scorecard_is_empty_when_nothing_is_promoted`) would fail whenever run alongside
-  other integration tests, which apparently nobody had done before (CI doesn't run this
-  suite). Fixed in `tests/integration/conftest.py` with a per-test SAVEPOINT-based
-  transaction that's rolled back after every test, regardless of how many times the test
-  code itself calls `.commit()`.
+  (`testcontainers`), skipped automatically (not failed) when Docker isn't reachable. An
+  earlier pass here found and fixed a real isolation bug: the container is shared across
+  every test in the session for speed, but there was no per-test rollback, so data written
+  by one test leaked into the next. Fixed in `tests/integration/conftest.py` with a
+  per-test SAVEPOINT-based transaction that's rolled back after every test, regardless of
+  how many times the test code itself calls `.commit()`.
 - **`tests/golden/`** — determinism tests for the (partially-built) simulation primitives —
   byte-identical output across repeated runs with the same seed.
 - **`tests/e2e/`** — exists as a directory, currently empty. No end-to-end browser test

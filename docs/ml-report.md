@@ -39,3 +39,109 @@ Training window: months [(2024, 1)], 354632 train / 85898 val / 84840 test rows 
 Artifact: `data\models\eta-lgbm-20261003T110726.txt`
 
 <!-- ml-report:eta:end -->
+
+<!-- ml-report:network:start -->
+## M3 - Delay-propagation GNN
+
+Model version: `delay-gnn-20261004T170744` - trained 2026-10-04T17:07:44.177170+00:00
+
+Training data: BTS 2024-01 (docs/adr/0004), 334 airport nodes, 2076 train / 439 val / 440 test sequences (chronological split by time bucket). See docs/adr/0004 for why this trains on one BTS month and omits live-weather node features.
+
+### Baseline: historical mean by (airport, hour, day-of-week)
+
+| horizon | MAE (min) | RMSE (min) | n |
+|---|---|---|---|
+| t+1h | 19.38 | 35.50 | 40342 |
+| t+2h | 18.74 | 34.74 | 39853 |
+| t+3h | 17.87 | 33.97 | 39314 |
+| t+4h | 16.97 | 33.33 | 38785 |
+| t+5h | 16.09 | 32.75 | 38260 |
+| t+6h | 15.52 | 32.50 | 37782 |
+
+### Baseline: LightGBM on flat features + neighbor delay
+
+| horizon | MAE (min) | RMSE (min) | n |
+|---|---|---|---|
+| t+1h | 6.38 | 28.68 | 41110 |
+| t+2h | 6.42 | 28.76 | 40710 |
+| t+3h | 6.44 | 28.74 | 40228 |
+| t+4h | 6.45 | 28.75 | 39714 |
+| t+5h | 6.48 | 28.79 | 39173 |
+| t+6h | 6.53 | 28.90 | 38649 |
+
+### Diffusion-GCN + temporal GRU
+
+| horizon | MAE (min) | RMSE (min) | n |
+|---|---|---|---|
+| t+1h | 6.27 | 28.85 | 40342 |
+| t+2h | 6.24 | 28.81 | 39853 |
+| t+3h | 6.25 | 28.83 | 39314 |
+| t+4h | 6.27 | 28.96 | 38785 |
+| t+5h | 6.27 | 28.97 | 38260 |
+| t+6h | 6.28 | 29.06 | 37782 |
+
+Artifact: `data\models\delay-gnn-20261004T170744.pt`
+
+<!-- ml-report:network:end -->
+
+<!-- ml-report:anomaly:start -->
+## M4 - Learned anomaly layer
+
+Model version: `traj-autoencoder-20261004T171352` - trained 2026-10-04T17:13:52.252340+00:00
+
+Training data: ADS-B Exchange readsb-hist samples (docs/adr/0004), 4107 train / 1027 test segments (each resampled to 128 points). See docs/adr/0004 for why this trains on ADS-B Exchange historical samples and evaluates against rules-layer agreement rather than the spec's BTS-incident-based precision.
+
+Reconstruction MAE (normalized units): 0.0368
+
+### Agreement with the rules layer (services/inference/anomaly_rules.py)
+
+- 6 / 1027 test segments flagged by the rules layer
+- PR-AUC of the learned anomaly score vs. rule-flagged segments: 0.0052
+- Precision@k (k = number of rule-flagged segments): 0.0000
+
+*agreement with the rules layer on this sample, not the spec's BTS-incident-based precision - see this module's docstring and docs/adr/0004*
+
+Artifact: `data\models\traj-autoencoder-20261004T171352.pt`
+
+<!-- ml-report:anomaly:end -->
+
+<!-- ml-report:trajectory:start -->
+## M1 - Trajectory forecasting (probabilistic)
+
+Model version: `traj-gru-20261005T061854` - trained 2026-10-05T06:18:55.877142+00:00
+
+Training data: ADS-B Exchange readsb-hist samples (docs/adr/0004), 422729 train / 101855 val / 102911 test windows (chronological split by window anchor time, train ends 2024-01-01 14:41:33.622000, val ends 2024-01-01 14:50:16.372000). See docs/adr/0004 for why this trains on ADS-B Exchange historical samples rather than this project's own live-ingested history.
+
+### Baseline: constant-velocity dead reckoning
+
+| horizon | median error (km) | P90 error (km) | n |
+|---|---|---|---|
+| 60s | 0.38 | 1.56 | 102900 |
+| 180s | 1.57 | 8.23 | 76428 |
+| 300s | 3.24 | 17.61 | 52016 |
+| 600s | - | - | 0 |
+| 900s | - | - | 0 |
+
+### GRU (quantile regression, median/q50)
+
+| horizon | median error (km) | P90 error (km) | n |
+|---|---|---|---|
+| 60s | 9.67 | 16.62 | 102900 |
+| 180s | 29.27 | 50.29 | 76428 |
+| 300s | 49.22 | 84.11 | 52016 |
+| 600s | - | - | 0 |
+| 900s | - | - | 0 |
+
+### 80% interval coverage (fraction of true positions inside [q10, q90])
+
+| horizon | coverage |
+|---|---|
+| 60s | 59.1% |
+| 180s | 62.2% |
+| 300s | 64.1% |
+| 600s | n/a |
+| 900s | n/a |
+
+Artifact: `data\models\traj-gru-20261005T061854.onnx` (ONNX)
+
+<!-- ml-report:trajectory:end -->

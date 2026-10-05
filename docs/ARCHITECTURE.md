@@ -348,6 +348,121 @@ estimates are physically grounded from day one with zero training data required,
 a learned model that would need real fuel-flow ground truth (which ADS-B data doesn't
 contain) to be trustworthy at all.
 
+### ML — a GRU with quantile heads for M1 (trajectory forecasting)
+
+**What:** A 2-layer GRU (gated recurrent unit — a sequence model, simpler and faster to
+train than an LSTM, well suited to short sequences) consuming a 55-60 second window of an
+aircraft's recent kinematics, predicting position at five horizons (60s to 900s out) as
+three quantiles ({0.1, 0.5, 0.9}) rather than one point estimate.
+
+**Why a sequence model here, unlike M2:** Trajectory data genuinely has sequential
+structure — an aircraft's next position depends on its recent velocity and turn-rate
+history, exactly the pattern a recurrent model is built to exploit. This is the mirror
+image of the LightGBM-vs-neural-net reasoning above: M2's features are flat and tabular
+(no benefit from a sequence model); M1's input *is* a sequence (no benefit from a tree
+model, which would have to be handed hand-engineered lag features to approximate what a
+GRU learns directly).
+
+**Why quantiles instead of a single predicted point:** A single number hides how
+confident the model is — an aircraft in steady cruise is far more predictable 15 minutes
+out than one turning onto final approach. Predicting {0.1, 0.5, 0.9} gives an actual
+uncertainty cone (visualized on the live map as the gap between q10 and q90), and is
+trained with pinball loss (an asymmetric loss that directly optimizes for calibrated
+quantiles, not just point accuracy) rather than plain MSE/MAE.
+
+**Why ONNX for serving, not loading the PyTorch model directly:** `services/inference/
+trajectory.py` runs inference via `onnxruntime`, never importing `torch`. This keeps the
+`api` service's own dependency footprint free of PyTorch (a genuinely heavy dependency)
+— only the `ml` extras used for *training* need it. ONNX is also runtime-portable: the
+same exported `.onnx` file would load in a non-Python serving process without any code
+changes.
+
+**Real result, reported honestly:** on the one-hour training window this model actually
+has (see [ADR 0004](adr/0004-historical-trajectory-data-source.md)), the GRU does *not*
+beat the constant-velocity dead-reckoning baseline the master spec requires as the bar to
+clear — the baseline wins at every horizon with test coverage (60s/180s/300s; 600s/900s
+have zero valid test windows from a window this short). Real aircraft in level cruise are
+close enough to constant-velocity over these short horizons that dead reckoning is a
+genuinely strong baseline, and one hour of training data wasn't enough for the GRU to
+clear it. This is still served live and still produces a real calibrated-looking
+uncertainty cone — it's just not yet more accurate than the physics it's competing
+against, and the ADR's addendum explains why and what would plausibly fix it.
+
+### ML — a diffusion graph convolution + temporal GRU for M3 (delay-propagation GNN)
+
+**What:** A custom, from-scratch spatio-temporal graph neural network
+(`ml/models/delay_gnn.py`) — not a third-party graph-learning library. Each layer
+propagates every airport's features to its graph-connected neighbors (weighted by a
+precomputed, row-normalized adjacency matrix), repeated over multiple "hops" so
+information travels across the network in one pass; a shared-weight GRU then runs each
+node's propagated-feature sequence forward in time.
+
+**Why two separate adjacency matrices (flow, rotation), not one:** The master spec is
+explicit that rotation edges (the same aircraft's inbound-arrival-to-outbound-departure
+link) are "the mechanism that makes cascades realistic," distinct from scheduled flow
+volume — a busy route between two airports and an aircraft physically delayed at one
+airport and due to depart from it next are different propagation mechanisms, so the model
+gets two separate weighted graphs to learn from, combined (not summed) in each layer so
+it can weight them differently.
+
+**Why a from-scratch implementation instead of PyTorch Geometric or DGL:** At this
+project's graph size (~334 nodes, two dense adjacency matrices), the actual "diffusion
+convolution" operation is a handful of matrix multiplications (`torch.einsum` calls) —
+genuinely simpler to write directly than to add and learn a general-purpose graph
+library's API for. This keeps the model's mechanism fully inspectable in about 100 lines,
+which matters for being able to explain *exactly* what it's doing, not just that a
+library did something graph-shaped.
+
+**Real result:** `docs/ml-report.md` shows the GNN beating both required baselines —
+substantially ahead of a historical-mean-by-(airport,hour,day-of-week) baseline, and by a
+smaller but real margin ahead of LightGBM-plus-one-hop-neighbor-delay, which is the more
+meaningful comparison (it isolates the value of the GNN's multi-hop graph propagation
+specifically, not just "using a model at all").
+
+### ML — a 1D convolutional autoencoder for M4's learned anomaly layer
+
+**What:** A flight segment resampled to a fixed 128 points is compressed through
+1D-convolutional encoder layers to a 64-dimensional embedding, then reconstructed by a
+mirrored decoder; reconstruction error (and an `IsolationForest` fit on the embeddings)
+is the anomaly score — a segment that looks unlike the "normal" shapes the autoencoder
+was trained on reconstructs poorly or sits in a sparse region of embedding space.
+
+**Why unsupervised, when the rules layer already exists:** The rules layer
+(`services/inference/anomaly_rules.py`) catches specific, named patterns (an emergency
+squawk, an unusually steep descent) that someone had to think of in advance. An
+autoencoder trained only on "normal" flight shapes can in principle flag something
+genuinely novel that no rule anticipated — that's the whole case for adding a learned
+layer on top of rules at all. Whether it actually delivers that in practice is an
+empirical question this project measures honestly, not assumes: see the real (currently
+weak) result in `docs/ml-report.md` and the scope note in
+[ADR 0004](adr/0004-historical-trajectory-data-source.md) about why that evaluation is
+closer to "does the embedding agree with the rules" than the full BTS-incident-based
+check the original spec describes.
+
+### Monte Carlo conflict estimation for M5
+
+**What:** `services/inference/conflict.py` prunes aircraft pairs by H3 grid proximity and
+altitude band (cheap, before any model inference), then for surviving pairs samples 200
+simulated trajectories per aircraft from M1's quantile predictions (treating {q10, q50,
+q90} as defining a triangular distribution per axis) and checks closest-point-of-approach
+across every sample.
+
+**Why Monte Carlo instead of a closed-form probability:** Two aircrafts' predicted
+positions are each a 3-quantile distribution at multiple horizons — there's no simple
+closed-form formula for "probability these two uncertainty cones intersect" from just
+three quantile points. Sampling is the standard, simple way to turn "I have some
+predicted distribution" into "here's a probability of a joint event," without needing a
+parametric assumption about the full shape of either distribution beyond what the three
+quantiles already specify.
+
+**Why a deterministic, seeded RNG, not Python's global `random`:** The master spec's
+determinism requirement ("a single seeded RNG... no wall-clock reads") exists for the
+counterfactual simulator, but this project applies the same discipline here too — the
+same aircraft snapshot and predictions should always produce the same conflict
+probability, which matters for testing (`tests/unit/test_conflict.py` asserts exactly
+this) and for not having a live API endpoint's output silently vary between identical
+requests.
+
 ### Observability — Prometheus + Grafana, structlog
 
 **What:** Prometheus scrapes `/metrics` off the API process and stores time-series metrics;
