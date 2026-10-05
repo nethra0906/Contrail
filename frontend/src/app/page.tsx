@@ -1,4 +1,5 @@
 import { AircraftPanel } from "@/components/map/AircraftPanel";
+import { AnomalyFeed } from "@/components/map/AnomalyFeed";
 import { LiveMap } from "@/components/map/LiveMap";
 import { Nav } from "@/components/ui/Nav";
 
@@ -9,6 +10,7 @@ export default function Home() {
       <main className="relative flex flex-1 overflow-hidden">
         <div className="relative flex-1">
           <LiveMap />
+          <AnomalyFeed />
         </div>
         <AircraftPanel />
       </main>

@@ -17,6 +17,7 @@ interface NavItem {
 // still "coming soon" and renders the stage-tooltip popover below.
 const NAV_ITEMS: NavItem[] = [
   { label: "Live", href: "/" },
+  { label: "Airports", href: "/airports" },
   {
     label: "Timeline",
     stage: "Stage 6",
