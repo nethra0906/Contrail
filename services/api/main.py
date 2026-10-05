@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from services.api.routers import aircraft, airports, health, models
+from services.api.routers import aircraft, airports, anomalies, conflicts, health, models
 from services.api.ws.live import router as ws_live_router
 from services.common.config import get_settings
 from services.common.telemetry import configure_logging, get_logger
@@ -43,6 +43,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(aircraft.router, prefix="/api/v1")
     app.include_router(airports.router, prefix="/api/v1")
+    app.include_router(anomalies.router, prefix="/api/v1")
+    app.include_router(conflicts.router, prefix="/api/v1")
     app.include_router(models.router, prefix="/api/v1")
     app.include_router(ws_live_router)
 

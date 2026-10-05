@@ -33,7 +33,13 @@ from services.assembler.sinks.flights import write_closed_leg, write_opened_leg
 from services.assembler.sinks.live_fanout import publish_delta
 from services.assembler.sinks.nearest_airport import nearest_airport_icao
 from services.assembler.sinks.parquet import ParquetBuffer, flush_rows
-from services.common.bus import TOPIC_ADSB_RAW, TOPIC_FLIGHTS_EVENTS, make_consumer, make_producer
+from services.common.bus import (
+    TOPIC_ADSB_RAW,
+    TOPIC_ANOMALIES_DETECTED,
+    TOPIC_FLIGHTS_EVENTS,
+    make_consumer,
+    make_producer,
+)
 from services.common.cache import get_redis
 from services.common.config import get_settings
 from services.common.db import get_sessionmaker
@@ -102,6 +108,23 @@ async def handle_message(
                 )
         for event in anomaly_events:
             ANOMALIES_DETECTED_TOTAL.labels(kind=event.kind.value).inc()
+            # The live anomaly feed (master spec Stage 5 deliverable): a
+            # separate topic from adsb.enriched, so a consumer that only
+            # cares about anomalies (the frontend's live feed, eventually a
+            # paging/alerting worker) doesn't have to filter the full
+            # enriched position stream to find them.
+            await events_producer.send_and_wait(
+                TOPIC_ANOMALIES_DETECTED,
+                value={
+                    "icao24": sv.icao24,
+                    "ts": sv.ts.isoformat(),
+                    "kind": event.kind.value,
+                    "score": event.score,
+                    "evidence": event.evidence,
+                    "flight_id": str(open_leg.flight_id) if open_leg else None,
+                },
+                key=sv.icao24.encode(),
+            )
 
     await publish_enriched(
         events_producer,

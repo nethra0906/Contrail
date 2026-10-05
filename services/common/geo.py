@@ -96,6 +96,15 @@ def latlon_to_h3(lat: float, lon: float, resolution: int = H3_LIVE_RESOLUTION) -
     return h3.latlng_to_cell(lat, lon, resolution)
 
 
+def h3_k_ring(cell: str, k: int) -> list[str]:
+    """Every H3 cell within `k` rings of `cell` (including `cell` itself) -
+    used by M5's conflict-candidate pruning (services/inference/conflict.py)
+    to cheaply rule out aircraft pairs that aren't even geographically
+    close before running the expensive Monte Carlo step on them.
+    """
+    return list(h3.grid_disk(cell, k))
+
+
 def bbox_contains(lat: float, lon: float, bbox: tuple[float, float, float, float]) -> bool:
     """bbox = (min_lat, max_lat, min_lon, max_lon)"""
     min_lat, max_lat, min_lon, max_lon = bbox

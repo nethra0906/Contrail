@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.common.config import get_settings
 from services.common.db import get_session
+from services.inference.trajectory import predict_trajectory
 
 router = APIRouter(prefix="/aircraft", tags=["aircraft"])
 
@@ -99,3 +100,22 @@ async def get_track(
         query, {"icao24": icao24.lower(), "from_": from_, "to": to, "limit": limit}
     )
     return [dict(row._mapping) for row in rows]
+
+
+@router.get("/{icao24}/prediction")
+async def get_prediction(icao24: str, session: AsyncSession = Depends(get_session)) -> dict:
+    """M1's live-serving endpoint (master spec §6): quantile position
+    predictions ("uncertainty cones") at each trained horizon. 404 when no
+    "trajectory" model is promoted yet, or this aircraft doesn't have
+    enough recent position history to compute a window from - both honest
+    "not available" states, never a prediction computed from insufficient
+    data.
+    """
+    prediction = await predict_trajectory(session, icao24)
+    if prediction is None:
+        raise HTTPException(
+            404,
+            f"no trajectory prediction available for {icao24} - either no model has been "
+            "promoted yet, or this aircraft doesn't have enough recent track history",
+        )
+    return prediction
