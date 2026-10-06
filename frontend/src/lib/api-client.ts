@@ -44,6 +44,23 @@ async function getJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(
+      (detail && typeof detail === "object" && "detail" in detail
+        ? String((detail as { detail: unknown }).detail)
+        : null) ?? `${path} -> ${res.status} ${res.statusText}`
+    );
+  }
+  return res.json() as Promise<T>;
+}
+
 export function getAircraftTrack(icao24: string): Promise<AircraftState[]> {
   return getJson<AircraftState[]>(`/api/v1/aircraft/${icao24}/track`);
 }
@@ -142,4 +159,67 @@ export interface DelayForecast {
 // every other not-yet-populated endpoint in this app already uses.
 export function getDelayForecast(icao: string): Promise<DelayForecast> {
   return getJson<DelayForecast>(`/api/v1/airports/${icao}/delay-forecast`);
+}
+
+// Stage 7, scoped down (docs/adr/0005): a real counterfactual - close one
+// airport's single modeled runway for part of a real historical BTS day
+// and see the delay this adds, plus (best-effort) M3's own forecast of the
+// ripple at flow-connected neighbor airports. `airport` here is a BTS/IATA
+// station code (e.g. "ATL", "BOI"), NOT the ICAO codes the rest of this
+// app otherwise uses - this feature has no live-DB dependency at all.
+export interface SimulationRequest {
+  airport: string;
+  date: string; // "YYYY-MM-DD", within the cached BTS month (January 2024)
+  closureStartMinute: number; // minutes after midnight UTC
+  closureDurationMinutes: number;
+}
+
+export interface FlightDelayResult {
+  flight_id: string;
+  scheduled_minute: number;
+  baseline_wait_min: number;
+  scenario_wait_min: number;
+  added_delay_min: number;
+}
+
+export interface NetworkRipple {
+  model_version: string;
+  horizon_minutes: number;
+  neighbor_delay_delta_min: Record<string, number>;
+}
+
+export interface SimulationResult {
+  airport: string;
+  date: string;
+  total_added_delay_min: number;
+  affected_flight_count: number;
+  max_added_delay_min: number;
+  flights_simulated: number;
+  baseline_mean_wait_min: number;
+  baseline_max_wait_min: number;
+  single_runway_model_already_saturated: boolean;
+  top_delayed_flights: FlightDelayResult[];
+  network_ripple: NetworkRipple | null;
+}
+
+export function runSimulation(req: SimulationRequest): Promise<SimulationResult> {
+  const forkTs = `${req.date}T00:00:00Z`;
+  const closureFrom = new Date(
+    new Date(forkTs).getTime() + req.closureStartMinute * 60_000
+  ).toISOString();
+  return postJson<SimulationResult>("/api/v1/simulations", {
+    scenario: {
+      fork_ts: closureFrom,
+      horizon_minutes: Math.min(req.closureDurationMinutes + 60, 720),
+      perturbations: [
+        {
+          type: "runway.close",
+          airport: req.airport.toUpperCase(),
+          runway: "SIM",
+          from: closureFrom,
+          duration_minutes: req.closureDurationMinutes,
+        },
+      ],
+    },
+  });
 }

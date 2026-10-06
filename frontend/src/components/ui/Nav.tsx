@@ -23,12 +23,7 @@ const NAV_ITEMS: NavItem[] = [
     stage: "Stage 6",
     description: "Scrub back through any point in the retention window and replay it.",
   },
-  {
-    label: "Sandbox",
-    stage: "Stage 7",
-    description:
-      "Fork reality at a timestamp, inject a disruption, and diff the counterfactual against what actually happened.",
-  },
+  { label: "Sandbox", href: "/sandbox" },
   { label: "Scorecard", href: "/scorecard" },
 ];
 
