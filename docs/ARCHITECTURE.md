@@ -463,6 +463,48 @@ probability, which matters for testing (`tests/unit/test_conflict.py` asserts ex
 this) and for not having a live API endpoint's output silently vary between identical
 requests.
 
+### Stage 7, scoped down — a synchronous DES simulator against real BTS history
+
+**What:** `services/simulator/engine.py` drives the already-built, already-tested
+`SimClock` (`des/clock.py`) and single-runway queueing state machine (`des/runway.py`)
+through a real demand sequence — every real scheduled arrival/departure at one airport on
+one real BTS day (`services/simulator/demand.py`) — twice: once unperturbed (the
+baseline), once with the scenario's `runway.close` perturbation applied, and diffs the
+two. `services/simulator/network_ripple.py` separately reuses M3's already-trained
+checkpoint, unmodified, to estimate the ripple at flow-connected neighbor airports. See
+[ADR 0005](adr/0005-scoped-stage-7-simulator.md) for the full scope-reduction rationale
+(no live-DB dependency, one representative runway per airport, synchronous not
+job-queued, only `runway.close` executed).
+
+**Why BTS history instead of a live snapshot:** this project has no live scheduled-flight
+timetable anywhere (the same gap M3's live-serving docstring already names) — a
+counterfactual has nothing real to perturb if it forks from a live snapshot with no real
+demand behind it. `services/simulator/historical.py`'s `BtsReferenceData` implements the
+exact same `ReferenceData` Protocol `services/simulator/spec.py`'s validator already
+expected, so the same two-stage `ScenarioSpec` validation gates a historical scenario
+exactly as it would a live one.
+
+**Why the M3 coupling needed no retraining:** `DelayGNN.forward()` is a stateless
+function of a feature tensor plus two fixed adjacency matrices — nothing about it is
+coupled to a live data source. Zeroing out the affected airport's `ops_count`/
+`cancellations`/delay features for the trailing buckets a closure would affect, then
+comparing that forward pass's output to the real unperturbed history's, is a legitimate,
+bounded reuse of the model's own learned propagation structure (the ADR states precisely
+what this is and isn't claiming).
+
+**A real performance bug found and fixed in this pass:** the first working version of
+`network_ripple.py` called `ml.datasets.network.build_graph()` to get the airport list
+for indexing — but `build_graph()`'s rotation-edge computation (a per-tail-number Python
+loop over the full BTS month) cost ~107 of a ~114-second cold path, to compute two
+adjacency matrices this module never uses (it always uses the trained checkpoint's own
+adjacency for the actual forward pass). Fixed by building just the airport list directly
+(`sorted(set(df.origin) | set(df.dest))`) and passing placeholder adjacency into
+`build_arrays()`, which never reads adjacency values — cut the cold path to ~16 seconds.
+That one-time cost is now paid at API startup (`services/api/main.py`'s lifespan, via a
+background `asyncio.to_thread` task) rather than blocking whichever user's request
+happens to arrive first; every request after the (cached) warmup completes in well under
+100ms.
+
 ### Observability — Prometheus + Grafana, structlog
 
 **What:** Prometheus scrapes `/metrics` off the API process and stores time-series metrics;

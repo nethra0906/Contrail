@@ -159,8 +159,8 @@ run so you run those three yourself).
 make test-unit
 # or: .venv/Scripts/python.exe -m pytest tests/unit -v
 ```
-Expected: `185 passed` (as of this session; includes `tests/golden` only if you run it
-explicitly — `make test-unit` itself targets only `tests/unit`, 163 of the 185).
+Expected: `206 passed` (as of this session; includes `tests/golden` only if you run it
+explicitly — `make test-unit` itself targets only `tests/unit`).
 
 ```bash
 # Integration tests — needs Docker (spins up its own ephemeral Postgres container
@@ -240,7 +240,41 @@ After training, `GET http://localhost:8000/api/v1/models/scorecard` and the `/sc
 frontend page will show real metrics instead of the "no model has been promoted yet" empty
 state.
 
-## 14. Test the WebSocket live feed directly (useful for debugging)
+## 14. Try the counterfactual simulator (Stage 7, scoped down)
+
+No Docker, no database, and no `make train` required - this feature runs entirely against
+the cached BTS month M2/M3 already download, with the delay-propagation GNN checkpoint
+used only if one happens to exist (`data/models/delay-gnn-*.pt`). The API's own startup
+warms its caches in the background (see [Architecture](ARCHITECTURE.md)'s Stage 7
+section), so the first real request after a few seconds of uptime is already fast.
+
+```bash
+# API, any way you'd normally run it (make api-dev, or inside docker compose):
+curl -s -X POST http://localhost:8000/api/v1/simulations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scenario": {
+      "fork_ts": "2024-01-15T10:00:00Z",
+      "horizon_minutes": 120,
+      "perturbations": [
+        {"type": "runway.close", "airport": "BOI", "runway": "SIM",
+         "from": "2024-01-15T10:00:00Z", "duration_minutes": 60}
+      ]
+    }
+  }'
+```
+Expected: a JSON body with `total_added_delay_min`, `affected_flight_count`,
+`top_delayed_flights`, and (if a trained "network" model exists) `network_ripple`. Try
+`"airport": "ATL"` to see the honest `single_runway_model_already_saturated: true` caveat
+- a real hub's demand exceeds what this scoped engine's one-modeled-runway can represent
+(see [ADR 0005](adr/0005-scoped-stage-7-simulator.md)). `airport`/`runway` use BTS/IATA
+station codes, not the live ICAO codes the rest of this app uses, and `date` must fall
+within the cached January 2024 BTS month.
+
+Or use the frontend: `make frontend-dev`, then open `http://localhost:3000/sandbox` for
+the same thing as a form with a results panel.
+
+## 15. Test the WebSocket live feed directly (useful for debugging)
 
 ```bash
 .venv/Scripts/python.exe - <<'EOF'
@@ -261,7 +295,7 @@ EOF
 `SELECT h3_r5, count(*) FROM state_vectors GROUP BY h3_r5 ORDER BY 2 DESC LIMIT 5;` against
 the running Postgres container to find one.)
 
-## 15. Shut everything down
+## 16. Shut everything down
 
 ```bash
 docker compose down

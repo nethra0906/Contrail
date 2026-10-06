@@ -216,15 +216,18 @@ and what that means).
 | GET | `/api/v1/anomalies?since_minutes&kind=` | Recently detected anomalies (emergency squawk, rapid descent, go-around) from the now-wired rules layer. |
 | GET | `/api/v1/conflicts?bbox=&min_prob=` | M5's candidate conflict pairs in a bounding box, scored by Monte Carlo sampling from M1's predictions. |
 | GET | `/api/v1/models/scorecard?model=` | The currently-promoted model(s) and their real evaluation metrics. |
+| POST | `/api/v1/simulations` | Stage 7, scoped down - closes one airport's modeled runway on a real historical BTS day and diffs the delay it adds, plus (best-effort) M3's own ripple estimate. See [ADR 0005](adr/0005-scoped-stage-7-simulator.md). |
 | GET | `/metrics` | Prometheus scrape target. |
 | WS | `/ws/live` | Subscribe (`{"op":"subscribe","h3_cells":[...]}`), receive binary FULL then DELTA frames. |
 
 The aircraft/airports/models/WS endpoints were hit against the real running stack
 (not just read from source) during an earlier verification pass — including a real
 WebSocket client decoding real binary frames of real aircraft over San Antonio. The
-Stage 5 endpoints (`/prediction`, `/delay-forecast`, `/anomalies`, `/conflicts`) are
-new and exercise real trained models; see [Data flows](DATA_FLOWS.md) for their
-request-to-response traces.
+Stage 5 endpoints (`/prediction`, `/delay-forecast`, `/anomalies`, `/conflicts`) and the
+Stage 7 `/simulations` endpoint are new and exercise real trained models; `/simulations`
+was verified live end to end in a browser against `/sandbox`, including the real
+~114s→~16s cold-start performance fix described in [Architecture](ARCHITECTURE.md). See
+[Data flows](DATA_FLOWS.md) for their request-to-response traces.
 
 ## 11. Database
 
@@ -396,13 +399,17 @@ someone asks a follow-up question.
   return 404, not a fabricated prediction, when there isn't enough real input to compute
   one from. M2's ETA model still has no live-serving endpoint — `/api/v1/models/scorecard`
   reports its training-time metrics only.
-- **The counterfactual simulator — the project's stated flagship feature — doesn't exist
-  yet.** Only two low-level primitives are built (a deterministic event clock, a single-
-  runway queueing model) plus scenario-spec validation. There's no simulation engine, no
-  API surface, no worker process, and no frontend beyond an honest "coming soon" nav item.
-  The time-machine/snapshot feature is in the same state. M3's delay-propagation model is
-  the piece Stage 7's simulator will eventually couple to a discrete-event layer — it
-  exists and works standalone today, but that coupling hasn't been built.
+- **The counterfactual simulator — the project's stated flagship feature — exists, but
+  scoped down from the full spec.** See [ADR 0005](adr/0005-scoped-stage-7-simulator.md)
+  for the complete list; the short version: it replays real BTS historical demand (there's
+  no live scheduled-flight timetable to fork from), models one representative runway per
+  airport (not a hub's full multi-runway capacity - surfaced honestly via
+  `single_runway_model_already_saturated` in the API response, not hidden), only executes
+  `runway.close` perturbations, runs synchronously rather than through a job queue + WS
+  stream, and couples to M3 with zero retraining rather than the spec's live-forking
+  propagation model. `/sandbox` is a form and results panel, not the spec's split-screen
+  diff map and animated cascade graph. The time-machine/snapshot feature (Stage 6) remains
+  entirely unbuilt.
 - **No authentication on any endpoint**, though this is currently low-risk since the API is
   entirely read-only — see §12.
 - **Two backend services (`ingest`, `assembler`) define Prometheus metrics but don't
@@ -428,12 +435,20 @@ someone asks a follow-up question.
 
 ## 18. Future improvements, realistically
 
-**High priority** (blocks the project's stated flagship capability, or closes a real gap
-found building Stage 5):
-- Build the actual simulation engine (`services/simulator/`) on top of the existing DES
-  primitives, coupling it to M3's now-working delay-propagation model as the spec's
-  hybrid DES+GNN design calls for — this is the single largest piece of work standing
-  between the current state and the project's stated flagship feature.
+**High priority** (closes the gap between the scoped Stage 7 simulator and the full spec,
+or a real gap found building Stage 5):
+- Expand the simulator beyond one representative runway per airport to a real multi-runway
+  model with fitted per-(airport, runway, config, wtc-pair) service-time distributions -
+  the single largest piece of work standing between the current scoped engine
+  (ADR 0005) and the master spec's full Stage 7 design, and the fix for why a real hub
+  like ATL shows an already-saturated baseline today.
+- Build the job-queue/worker/`sim.frames` WebSocket-streaming layer and the split-screen
+  diff map + animated cascade graph the spec calls for - the current synchronous
+  request/response + form-and-results-panel UI is real but intentionally minimal.
+- Add `capacity.scale`, `ground_stop`, and `flight.cancel` perturbation execution (all
+  three already validate structurally via `ScenarioSpec` today, just not executed -
+  `weather.inject` additionally needs the OpenAP fuel-delta integration and a real
+  weather-ingestion pipeline, neither of which exist yet).
 - Give M3 live weather features — the model trains and serves without them today
   (ADR 0004); a NOAA Aviation Weather ingestion pipeline (feeding both live serving and
   future retraining) would likely improve forecast accuracy specifically during the

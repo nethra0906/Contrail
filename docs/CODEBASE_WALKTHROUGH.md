@@ -45,15 +45,17 @@ it lives here, once.
   field-by-field and must stay in sync by hand (there's no shared schema file generating
   both sides).
 - **`determinism.py`** — `Rng` (a seeded wrapper around `random.Random`, with a `.spawn()`
-  method for deterministically-derived child generators) and `spec_hash`. This exists for
-  the not-yet-built counterfactual simulator: *"the entire product claim... is that
+  method for deterministically-derived child generators) and `spec_hash`. Written for the
+  counterfactual simulator's determinism claim: *"the entire product claim... is that
   (snapshot_id, scenario_spec_hash, model_versions, seed) reproduces byte-identical
-  output"* (the module's own docstring). Nothing in the simulator consumes this yet
-  (the simulator itself isn't built — see [Limitations](LEARNING_GUIDE.md#17-limitations-honestly)),
-  but the rule is already enforced by convention: *"grep for `import random` outside this
-  file is a code-review red flag."* Added test coverage this session
-  (`tests/unit/test_determinism.py`) since it had none before, despite its own docstring
-  calling it "the entire product claim."
+  output"* (the module's own docstring). The scoped Stage 7 engine
+  (`services/simulator/engine.py`) ended up needing no randomness at all - replaying a
+  real, fixed BTS demand sequence through the runway queue is deterministic by
+  construction, with nothing to seed - so `Rng` is actually consumed by M5's Monte Carlo
+  conflict sampling (`services/inference/conflict.py`, `Rng.spawn(f"{i}:{j}")` per
+  candidate pair) rather than the simulator. The rule is enforced by convention: *"grep
+  for `import random` outside this file is a code-review red flag."* Test coverage:
+  `tests/unit/test_determinism.py`.
 - **`telemetry.py`** — `structlog` JSON logging setup, shared by every service, plus every
   Prometheus metric the system defines (deliberately a short, curated list — "a handful of
   metrics the stage plan actually uses... rather than an instrument-everything approach
@@ -221,10 +223,65 @@ Also note `aircraft.py` has one more route beyond the three above:
 `GET /api/v1/aircraft/{icao24}/prediction` (M1's live serving, via
 `services/inference/trajectory.py`).
 
-**What's conspicuously still not here:** no `snapshots.py` or `scenarios.py`/
-`simulations.py` router — the counterfactual sandbox and time-machine features (Stages
-6-7 of the master spec) have no API surface yet, matching that none of their backend logic
-is built either (see [Limitations](LEARNING_GUIDE.md#17-limitations-honestly)).
+- **`routers/simulations.py`** — `POST /api/v1/simulations`: Stage 7, scoped down (see
+  [ADR 0005](adr/0005-scoped-stage-7-simulator.md)). Rejects every `ScenarioSpec`
+  perturbation type except exactly one `runway.close` with a clear 400, validates against
+  `services/simulator/historical.py`'s BTS-backed `ReferenceData`, then calls
+  `services/simulator/engine.py` and (best-effort) `network_ripple.py`.
+
+**What's conspicuously still not here:** no `snapshots.py` router — the time-machine
+feature (Stage 6 of the master spec) has no API surface yet; its backend logic isn't
+built either (see [Limitations](LEARNING_GUIDE.md#17-limitations-honestly)).
+
+---
+
+## `services/simulator/` — Stage 7, scoped down: a real counterfactual against BTS history
+
+See [ADR 0005](adr/0005-scoped-stage-7-simulator.md) for the full scope-reduction
+rationale before reading this section - every file below exists in service of that
+documented decision, not the master spec's full design.
+
+- **`des/clock.py`** — `SimClock`, the deterministic event-queue core (heap-ordered by
+  `(sim_time, insertion_sequence)`, never wall-clock or object-identity dependent). Built
+  ahead of Stage 7's engine, fully generic/handler-based, and used as-is - nothing about
+  it changed to support the scoped engine.
+- **`des/runway.py`** — the pure, immutable single-runway queueing state machine
+  (`RunwayState`, `request_service()`, `close_runway()`). Also built ahead of time and
+  used as-is; `services/simulator/engine.py` is the first real caller.
+- **`spec.py`** — `validate_against_reference_data()`, the DB-aware half of `ScenarioSpec`
+  validation, built against a `ReferenceData` Protocol specifically so a non-Postgres
+  backing store could be swapped in later. `historical.py`'s `BtsReferenceData` is exactly
+  that swap - `spec.py` itself didn't need to change for Stage 7 to use it.
+- **`historical.py`** — adapts the cached BTS month (the same one M2/M3 train on) into
+  `ReferenceData`. `SIMULATED_RUNWAY_IDENT = "SIM"` is the one representative runway every
+  airport in this scoped engine is modeled as having. `load_simulation_reference_data()`
+  is cached per process (and warmed at API startup, `services/api/main.py`'s lifespan) -
+  building it touches every row of a 547K-row month even vectorized.
+- **`demand.py`** — `build_runway_demand()`: every real scheduled arrival/departure at one
+  airport on one real BTS day, sorted by scheduled time. Never fabricated demand.
+- **`engine.py`** — `simulate_runway_closure()`: drives `SimClock` + `runway.py` through
+  the same demand sequence twice (unperturbed baseline, then with the scenario's closure
+  applied) and diffs the two. `SimulationResult` also reports `baseline_mean_wait_min`/
+  `baseline_max_wait_min` - a real demand volume this one-runway model can't represent
+  (a busy hub like ATL) shows up here as an already-high baseline even before any
+  perturbation, surfaced rather than hidden.
+- **`network_ripple.py`** — couples the scenario to M3 (the delay-propagation GNN) with
+  **zero retraining**: loads the trained checkpoint, zeroes the closed airport's
+  ops/cancellation/delay features for the affected trailing buckets, and diffs the
+  model's own forward pass against real unperturbed history. Best-effort - returns `None`
+  rather than a fabricated number when no checkpoint exists or the airport isn't in the
+  training graph. A real performance bug was found and fixed here during this pass: the
+  first version called `ml.datasets.network.build_graph()` just to get the airport list,
+  which cost ~107 of a ~114-second cold path on its (unused, for this module) rotation-edge
+  computation - fixed by building the airport list directly and passing placeholder
+  adjacency into `build_arrays()` (which never reads adjacency values), cutting the cold
+  path to ~16 seconds, now paid once at API startup rather than per-request.
+
+Tests: `tests/unit/test_simulator_engine.py` (7 tests, including the master-spec-named
+"closing a runway must increase delay monotonically" property at the full-engine level
+and a byte-for-byte determinism check) and `tests/unit/test_network_ripple.py` (4 tests,
+against a small synthetic graph/model - never the real cached BTS month or a real trained
+checkpoint, so this suite runs fully offline).
 
 ---
 
@@ -357,6 +414,13 @@ React Query provider, the splash-screen gate) **and `app/page.tsx`** (`/`, the l
   plus a live call to `GET /api/v1/airports/{icao}/delay-forecast`, with a real empty
   state when no "network" model has been promoted yet or this airport wasn't in the
   training graph.
+- **`app/sandbox/page.tsx`** — Stage 7, scoped down: a form (BTS/IATA airport code,
+  January 2024 date, closure start/duration sliders) posting to
+  `POST /api/v1/simulations` via `useMutation`, then a results panel (aggregate delay,
+  the M3 ripple, most-delayed flights) - including the honest
+  `single_runway_model_already_saturated` caveat banner when the chosen airport's real
+  demand exceeds what this scoped engine's one-runway model can represent. See
+  [ADR 0005](adr/0005-scoped-stage-7-simulator.md).
 - **`lib/ws-client.ts`** — `useLiveAircraftFeed(bbox)`: converts the viewport to H3 cells
   (`bboxToH3Cells`, memoized and hardened against degenerate zero-area bboxes), opens the
   WebSocket, decodes frames, maintains the running `icao24 -> AircraftState` map, and
@@ -367,14 +431,15 @@ React Query provider, the splash-screen gate) **and `app/page.tsx`** (`/`, the l
   `services/common/ws_protocol.py`. Covered by round-trip tests (`ws-protocol.test.ts`).
 - **`lib/api-client.ts`** — the typed REST client, one typed function per backend
   endpoint — `listAirports`/`getAirport`/`getDelayForecast`/`getAnomalies` were added
-  alongside the Stage 5 endpoints they call. The scorecard types
+  alongside the Stage 5 endpoints they call, and `runSimulation` (plus a `postJson`
+  helper alongside the existing `getJson`) for Stage 7. The scorecard types
   (`ScorecardEntry.metrics`) are deliberately a loose `Record<string, unknown>` rather
   than one fixed shape, since each model kind's report genuinely looks different —
   `ScorecardView.tsx` narrows per kind at render time instead of forcing one schema.
 - **`lib/store.ts`** — the Zustand store (viewport bbox, selected aircraft).
-- **`components/ui/Nav.tsx`** — the top nav. "Timeline" and "Sandbox" are shown as real,
-  explicitly-labeled "coming soon" items, not broken or hidden links — honest UI for
-  features that genuinely aren't built yet.
+- **`components/ui/Nav.tsx`** — the top nav. "Sandbox" now links to the real `/sandbox`
+  page; "Timeline" remains a real, explicitly-labeled "coming soon" item (Stage 6, not
+  built) rather than a broken or hidden link.
 - **`app/error.tsx`** — (added this session) an App Router render-error boundary, styled
   with the app's existing design tokens, so a render-time exception (e.g. from the deck.gl
   layer) shows a branded recovery screen instead of Next's generic default.
@@ -384,8 +449,12 @@ React Query provider, the splash-screen gate) **and `app/page.tsx`** (`/`, the l
 ## `tests/`
 
 - **`tests/unit/`** — pure-logic tests, no external services, run via `make test-unit`
-  (`pytest tests/unit`). 195 tests, including `test_conflict.py` (M5's candidate pruning
-  and Monte Carlo determinism — 13 tests), `test_ratelimit.py`, and `test_determinism.py`.
+  (`pytest tests/unit`). 206 tests, including `test_conflict.py` (M5's candidate pruning
+  and Monte Carlo determinism — 13 tests), `test_simulator_engine.py` (Stage 7's DES
+  driver — 7 tests, including the master-spec-named "closing a runway must increase
+  delay monotonically" property and a byte-for-byte determinism check),
+  `test_network_ripple.py` (the M3 coupling, against a synthetic graph — 4 tests),
+  `test_ratelimit.py`, and `test_determinism.py`.
 - **`tests/integration/`** — tests against a real, ephemeral TimescaleDB container
   (`testcontainers`), skipped automatically (not failed) when Docker isn't reachable. An
   earlier pass here found and fixed a real isolation bug: the container is shared across
@@ -393,8 +462,11 @@ React Query provider, the splash-screen gate) **and `app/page.tsx`** (`/`, the l
   by one test leaked into the next. Fixed in `tests/integration/conftest.py` with a
   per-test SAVEPOINT-based transaction that's rolled back after every test, regardless of
   how many times the test code itself calls `.commit()`.
-- **`tests/golden/`** — determinism tests for the (partially-built) simulation primitives —
-  byte-identical output across repeated runs with the same seed.
+- **`tests/golden/`** — determinism tests for the simulator's own event-queue primitives
+  (`des/clock.py`) — byte-identical output across repeated runs with the same seed; the
+  scoped Stage 7 engine's own determinism is instead covered directly in
+  `tests/unit/test_simulator_engine.py` (same property, exercised against the real
+  demand-driven engine rather than a toy scenario).
 - **`tests/e2e/`** — exists as a directory, currently empty. No end-to-end browser test
   tooling (Playwright/Cypress) is set up yet.
 

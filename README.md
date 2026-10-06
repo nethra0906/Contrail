@@ -12,12 +12,16 @@ forward, and diff the counterfactual world against what actually happened.
 > **Status: early build.** Stage 1 (foundation), Stage 2 (live map MVP), Stage
 > 3 (streaming backbone, end to end including the frontend's switch to the
 > binary `/ws/live` feed), Stage 4 (M2 ETA regression, trained on real BTS
-> data), and Stage 5 (Network Intelligence - M1 trajectory forecasting, M3
+> data), Stage 5 (Network Intelligence - M1 trajectory forecasting, M3
 > delay-propagation GNN, M4's learned anomaly layer, M5 conflict probability,
-> all trained on real data with real baselines) are implemented and tested.
-> See [Build status](#build-status) below for exactly what's real today
-> versus what's specified but not yet built. This section will be replaced
-> with real screenshots and a demo link once further stages land - see
+> all trained on real data with real baselines), and a scoped-down Stage 7
+> (a real counterfactual runway-closure simulator against real historical
+> data, coupled to M3 with no retraining - see
+> [ADR 0005](docs/adr/0005-scoped-stage-7-simulator.md) for exactly what's
+> scoped down and why) are implemented and tested. See
+> [Build status](#build-status) below for exactly what's real today versus
+> what's specified but not yet built. This section will be replaced with real
+> screenshots and a demo link once further stages land - see
 > `docs/CONTRAIL_MASTER_SPEC.md` for the full plan.
 
 ## Why this exists
@@ -200,9 +204,34 @@ what was *rejected* (Kubernetes, Neo4j, MongoDB, Airflow) and why.
   - Full real numbers for every model: [`docs/ml-report.md`](docs/ml-report.md),
     regenerated from `ml/eval/` training-run metrics, never hand-entered.
 
+- **Stage 7 (counterfactual simulator), scoped down** - see
+  [ADR 0005](docs/adr/0005-scoped-stage-7-simulator.md) for exactly what's
+  cut and why (16GB-RAM/no-GPU, ship-fast constraints). A real discrete-event
+  simulation: close one airport's single modeled runway on a real historical
+  BTS day and see the delay it actually adds, via the already-built and
+  -tested `SimClock`/runway queueing primitives
+  (`services/simulator/engine.py`). Synchronous, not the spec's job-queue +
+  WebSocket-streaming design - a single day's run completes in well under a
+  second once the process's caches are warm. Also couples to M3 (the
+  delay-propagation GNN) with **zero retraining**: the trained checkpoint's
+  own forward pass estimates the ripple effect at flow-connected neighbor
+  airports (`services/simulator/network_ripple.py`). Honest, surfaced-not-
+  hidden limitation: this one-runway model is accurate for the hundreds of
+  smaller US airports BTS covers, but a real hub like ATL (which needs ~5
+  runways) shows an already-saturated baseline even with no closure applied
+  - the API returns `single_runway_model_already_saturated` so this is
+  visible in the data, not just the docs. Served via
+  `POST /api/v1/simulations`, with a working `/sandbox` frontend page (form
+  + results panel, not the spec's split-screen diff map/cascade animation).
+  11 passing unit tests cover the master-spec-named "closing a runway must
+  increase delay monotonically" property at the full-engine level plus a
+  byte-for-byte determinism check.
+
 **Specified, not yet built** (see `docs/CONTRAIL_MASTER_SPEC.md` §9 for the
-full 10-stage plan): the timeline/time-machine (Stage 6), and the
-counterfactual simulation sandbox - the flagship feature (Stage 7).
+full 10-stage plan): the timeline/time-machine (Stage 6), and the parts of
+Stage 7 ADR 0005 explicitly scoped out - multi-runway/weather/fuel modeling,
+the job-queue/WebSocket-streaming layer, and the split-screen diff
+map/cascade animation.
 
 **Known deviations from the original spec**, discovered by actually running
 the code against real services rather than assumed: `airplanes.live` is not

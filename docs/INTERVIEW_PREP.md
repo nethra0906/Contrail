@@ -13,8 +13,11 @@ hand-rolled binary WebSocket protocol for performance. On top of that I've train
 live-deployed four ML models: a GRU that forecasts an aircraft's position with calibrated
 uncertainty, a graph neural network that predicts delay propagation across the airport
 network, an autoencoder-based anomaly detector, and a Monte Carlo conflict-probability
-estimator. The long-term goal — not yet built — is a counterfactual simulator: fork reality
-at a timestamp, inject a disruption, and see how delay propagates through the network."
+estimator. I also built a real, scoped-down counterfactual simulator: close an airport's
+runway on a real historical day and see the delay it actually adds, via a deterministic
+discrete-event queue, plus the delay-propagation GNN's own forecast of the ripple at
+connected airports — scoped deliberately to run fast on a laptop rather than the full
+spec's multi-runway, job-queued design."
 
 ## 1-minute explanation
 
@@ -71,11 +74,15 @@ is demonstrably adding value, not just 'using a bigger model'; a convolutional a
 for anomaly detection; and a Monte Carlo conflict-probability estimator that samples from
 the trajectory model's uncertainty.
 
-"What's not built yet, and I'm specific about this rather than vague: the actual flagship
-feature, the counterfactual simulator itself. I have the low-level primitives (a
-deterministic event clock, a runway queueing model, scenario validation) and now the
-delay-propagation model the simulator's design calls for it to couple to — but not the
-engine that ties them together yet."
+"I did build the counterfactual simulator — the flagship feature — but scoped down on
+purpose, not to the full spec. It drives the deterministic event clock and runway
+queueing primitives I'd already built against real historical scheduled-flight data (BTS),
+closes one representative runway per airport, diffs the delay against a real baseline, and
+separately reuses the delay-propagation GNN's own trained weights — no retraining — to
+estimate the ripple at connected airports. What I cut, on purpose, given limited time and
+no GPU: multi-runway capacity modeling, the job-queue/WebSocket-streaming layer, and the
+split-screen diff map. It's a real, working, honestly-scoped slice of the flagship idea,
+not the full thing — and I can tell you exactly where the line is and why I drew it there."
 
 ## Architecture — how to draw it on a whiteboard
 
@@ -167,14 +174,29 @@ already wins, and it didn't get there. I reported that as the real result instea
 tuning until the comparison looked better, which is exactly the same standard I held the
 anomaly result to.
 
+**"Why does the simulator only model one runway per airport, and only close it - why not
+the other four scenario types your own schema already supports?"** Time and hardware
+constraints, stated up front rather than discovered by a follow-up question: I'm running
+this on a laptop with no GPU and 16GB of RAM, and I wanted a real, correct, end-to-end
+feature rather than a half-built multi-runway/weather/fuel model. `ScenarioSpec` already
+validates all five perturbation types structurally - closing a runway is the one I chose
+to actually execute because it's the simplest case that still produces a real, physically
+meaningful result (delay provably doesn't decrease when you close a runway, which I have a
+test for), and it's enough to demonstrate the real thing I wanted to prove: that the
+already-trained delay-propagation GNN can estimate network ripple effects from a scenario
+without retraining anything.
+
 ## Difficult technical questions — honest answers specific to this project
 
-**"How does authentication work?"** It doesn't, yet — every endpoint is read-only and
+**"How does authentication work?"** It doesn't, yet — every endpoint is read-only or (for
+`POST /api/v1/simulations`) stateless compute with no persisted side effect, and all are
 unauthenticated. That's a legitimate, current state, not an oversight I'm unaware of: there
-are zero write endpoints in the system, so there's genuinely nothing to protect yet. I did
-add a fail-fast check this session so the app refuses to start in a non-development
-environment if the reserved write-auth key is still at its default — security posture
-matched to the actual current attack surface, not theater for endpoints that don't exist.
+are zero endpoints that mutate stored data, so there's genuinely nothing to protect yet,
+though an unauthenticated compute-triggering POST is a real rate-limiting gap I'd close
+before this went anywhere near production traffic. I did add a fail-fast check this
+session so the app refuses to start in a non-development environment if the reserved
+write-auth key is still at its default — security posture matched to the actual current
+attack surface, not theater for endpoints that don't exist.
 
 **"How would this scale to 10x traffic?"** The first bottleneck would be `assembler` — it
 runs as a single replica today with in-process per-aircraft state (open flight legs, known
@@ -222,9 +244,10 @@ existed because nobody had run that suite together before, since CI never does.
 **"What are the limitations?"** See [Learning guide §17](LEARNING_GUIDE.md#17-limitations-honestly)
 for the full, honest list — the short version: five of six planned ML models are trained,
 honestly evaluated, and live-served (M1-M5); the counterfactual simulator (the stated
-flagship feature) still doesn't exist beyond two low-level primitives and M3's now-working
-delay-propagation model, which the simulator's design calls for but hasn't yet been coupled
-to a discrete-event engine; M3 has no live weather signal (no weather-ingestion pipeline
+flagship feature) is real and working but deliberately scoped down from the full spec
+(one representative runway per airport, synchronous not job-queued, only `runway.close`
+executed - [ADR 0005](adr/0005-scoped-stage-7-simulator.md)); the time-machine (Stage 6)
+remains entirely unbuilt; M3 has no live weather signal (no weather-ingestion pipeline
 exists); M1 and M4 train on a historical data sample rather than this project's own
-live-accumulated history; and there's no authentication (currently fine, given there's
-still nothing to write).
+live-accumulated history; and there's no authentication (currently fine for the read-only
+surface, though the simulator's compute-triggering POST is a real rate-limiting gap).

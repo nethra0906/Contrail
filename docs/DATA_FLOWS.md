@@ -400,6 +400,51 @@ services/inference/conflict.py :: monte_carlo_conflict_probability()
 
 ---
 
+## Flow 11 — Counterfactual runway-closure simulation (Stage 7, scoped down)
+
+```
+POST /api/v1/simulations  { scenario: ScenarioSpec }
+  ↓
+services/api/routers/simulations.py :: run_simulation()
+  → rejects any perturbation type other than exactly one `runway.close` (400, not silent)
+  ↓
+services/simulator/historical.py :: load_simulation_reference_data()  (cached per process)
+  → wraps the cached BTS month (the same one M2/M3 train on) in the `ReferenceData`
+     Protocol services/simulator/spec.py already expected - airports/runway idents are
+     BTS stations + the single SIMULATED_RUNWAY_IDENT ("SIM"), not live ICAO data
+  ↓
+services/simulator/spec.py :: validate_against_reference_data()
+  → the SAME two-stage ScenarioSpec validator a live scenario would go through -
+     unknown airport, horizon spanning outside the BTS month, etc. all rejected here
+  ↓
+services/simulator/demand.py :: build_runway_demand()
+  → every REAL scheduled arrival/departure at this airport on this BTS day, sorted by
+     scheduled time - never fabricated demand
+  ↓
+services/simulator/engine.py :: simulate_runway_closure()
+  → drives SimClock + runway.py's request_service() through the SAME demand list twice:
+     once unperturbed (baseline), once with the closure applied (scenario) - diffs the two
+  ↓                                              ↓ (independently, best-effort)
+  per-flight + aggregate delay diff    services/simulator/network_ripple.py :: estimate_ripple()
+                                          → loads M3's trained checkpoint (NO retraining),
+                                             zeroes the closed airport's ops/delay features
+                                             for the affected trailing buckets, and diffs
+                                             the GNN's own forward pass against real
+                                             unperturbed history - None if no checkpoint
+                                             exists or the airport isn't in the graph
+  ↓                                              ↓
+  { total_added_delay_min, affected_flight_count, top_delayed_flights,
+    single_runway_model_already_saturated, network_ripple }
+```
+
+Both `load_simulation_reference_data()` and `network_ripple`'s graph/checkpoint caches are
+warmed once at API startup (`services/api/main.py`'s lifespan, via a background
+`asyncio.to_thread` task) rather than on whichever request happens to arrive first - see
+[Architecture](ARCHITECTURE.md)'s Stage 7 section for the real ~114s→~16s cold-path fix
+this required.
+
+---
+
 ## See also
 
 - [Architecture](ARCHITECTURE.md) — why these paths are shaped this way.
