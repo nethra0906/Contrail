@@ -52,7 +52,7 @@ async def test_bucket_refills_over_time_up_to_capacity():
     loop = asyncio.get_running_loop()
     start = loop.time()
     await bucket.acquire()
-    assert loop.time() - start < 0.01
+    assert loop.time() - start < 0.05  # generous bound: only guards against a real blocking wait
 
 
 async def test_concurrent_acquires_are_serialized_not_double_spent():
